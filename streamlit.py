@@ -89,7 +89,7 @@ if st.button("Lemmatize"):
 
         st.dataframe(results, use_container_width=True)
 
-        lemmatized_sentence = " ".join([item["lemma"] for item in results])
+        lemmatized_sentence = " ".join([item["Lemma"] for item in results])
 
         st.subheader("Lemmatized Sentence")
         st.write(lemmatized_sentence)
