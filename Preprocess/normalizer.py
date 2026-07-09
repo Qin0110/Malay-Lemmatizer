@@ -1,6 +1,6 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
-os.add_dll_directory(r"C:\vcpkg\installed\x64-windows\bin")
+# os.add_dll_directory(r"C:\vcpkg\installed\x64-windows\bin")
 
 import logging
 logging.basicConfig(level=logging.INFO)
