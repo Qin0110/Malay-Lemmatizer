@@ -1,35 +1,32 @@
+import re
+
 from malindo_morph.dictionary import Dictionary
+from Preprocess.normalizer import Normalizer
+from Preprocess.tokenizer import Tokenizer
 
-malindo = Dictionary()
+string = 'boleh dtg 8pagi esok tak atau minggu depan? 2 oktober 2019 2pm, tlong bayar rm 3.2k sekali tau'
 
-words = [
-    "menggunting",
-    "gunting",
-    "membaca",
-    "dibaca",
-    "kebertanggungjawabannya",
-]
+normalizer = Normalizer()
+tokenizer = Tokenizer()
+dictionary = Dictionary()
 
-for word in words:
-    results = malindo.lookup(word)
+normalized_string = normalizer.normalize(string)
+tokens = tokenizer.tokenize(normalized_string)
 
-    print("=" * 50)
-    print("WORD:", word)
+results = []
+sentence_words = []
+for token in tokens:
+    result = dictionary.morphological_analysis(token)
+    results.append(result)
 
-    if not results:
-        print("Not found in MALINDO")
-        continue
+print('-' * 50)
+for i in range(len(results)):
+    print(results[i])
+    sentence_words.append(results[i]['Lemma'])
 
-    for r in results[:5]:
-        print({
-            "id": r["id"],
-            "root": r["root"],
-            "surface": r["surface"],
-            "prefix": r["prefix"],
-            "suffix": r["suffix"],
-            "circumfix": r["circumfix"],
-            "reduplication": r["reduplication"],
-            "source": r["source"],
-            "stem": r["stem"],
-            "lemma": r["lemma"],
-        })
+
+final_sentence = ' '.join(sentence_words)
+print()
+print('=' * 50)
+print('=' * 50)
+print('Sentence Words: ', final_sentence)
