@@ -37,3 +37,8 @@ Test-Path C:\vcpkg\installed\x64-windows\bin\zlib1.dll
 ```
 
 url: `https://chatgpt.com/share/6a4ffd98-c4b4-83ec-b382-06859e2883a6` (TIRED)
+
+
+# CUDA VERSION FOR UNSOLTH: 12.6
+pytorch: `https://pytorch.org/get-started/previous-versions/`
+`pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu126`
