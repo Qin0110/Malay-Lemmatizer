@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/Degree in Data Science/NLP/Malay Lemmatizer/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
