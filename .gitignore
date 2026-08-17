@@ -1,4 +1,4 @@
 env*
 __pycache__*
 Preprocess/normalizer.py
-unsloth/unsloth_compiled_cache*
+unsloth/unsloth_compiled_cache
