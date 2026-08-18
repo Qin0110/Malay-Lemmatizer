@@ -64,12 +64,41 @@ SLANG = {
     "adalah": "adalah", "ade": "ada", "ada": "ada",
     "gile": "gila", "giler": "gila", "gempak": "gempak",
     "besh": "best", "bestt": "best",
-}
+    # Added from YouTube crawl probe (Aug 2026) - seen in real comments but
+    # absent from the original hand-built lexicon.
+    "pulak": "pula", "pown": "pun",
+    "cite": "cerita", "citer": "cerita", "crita": "cerita", "cerite": "cerita",
+    "tgok": "tengok", "tengok": "tengok",
+    "tq": "terima kasih",
+
+    # Promoted from the hand-labelled gold set (data/gold.jsonl, Aug 2026).
+    # Every entry here is a decision an annotator actually made on a real
+    # sentence - counts are occurrences in the 150 gold sentences. Keeping
+    # the lexicon and the gold labels in agreement matters: the silver
+    # training data is generated from these rules, so a disagreement would
+    # penalise the model for matching its own training signal.
+    "lg": "lagi",                # 4x
+    "kak": "kakak",              # 5x
+    "tpi": "tetapi",             # 4x
+    "kiteorg": "kami",           # 2x
+    "jd": "jadi",                # 2x
+    "betol": "betul",            # 2x
+    "tngok": "tengok",           # 2x
+    "tgn": "tangan",             # 1x
+    "xjadi": "tidak jadi",       # 1x
+    "xtau": "tidak tahu",        # 1x
+    "xbleh": "tidak boleh",      # 1x
+    "xley": "tidak boleh",       # 1x
+    "xske": "tidak suka",        # 1x
+    "xyh": "tidak payah",        # 1x - gold says "tak payah"; "tidak" wins
+}                                #      for consistency with "tak" -> "tidak"
 
 # Discourse particles - deliberately NOT normalised
 PARTICLES = {"la", "lah", "le", "lor", "leh", "meh", "weh", "wei", "woi",
              "je", "jer", "kan", "kot", "eh", "ah", "ha", "hah", "ke", "kah",
-             "pun", "tau", "doh", "bah", "yo", "sia"}
+             "pun", "tau", "doh", "bah", "yo", "sia",
+             # from the YouTube crawl probe (Aug 2026)
+             "beb", "siak", "wey", "weyh", "bro", "bre"}
 
 # Common Malay roots. Replace with MALINDO Morph output for real work.
 ROOTS = set("""

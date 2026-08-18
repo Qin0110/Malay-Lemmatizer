@@ -1,4 +1,15 @@
 env*
 __pycache__*
 Preprocess/normalizer.py
-unsloth/unsloth_compiled_cache
+unsloth_compiled_cache/
+unsloth/unsloth_compiled_cache/
+# API keys - never commit
+.env
+
+
+# training checkpoints - ~160 MB each, only needed to RESUME an interrupted
+# run. The finished adapter is unsloth/lemmatizer_lora/, which IS committed.
+unsloth/training_runs/checkpoint-*/
+
+# intermediate labelling snapshots (auto-archived on sheet rebuild)
+data/gold_sheet_labelled_*.xlsx

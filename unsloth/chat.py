@@ -12,11 +12,11 @@ ADAPTER_DIR = "lemmatizer_lora"
 MAX_SEQ_LEN = 512
 CHAT_TEMPLATE = "llama-3.2"
 
-# CRITICAL: Must be BYTE-IDENTICAL to training (llm.py:42-45)
-SYSTEM_PROMPT = (
-    "Anda adalah pelemma bahasa Melayu. Untuk setiap token dalam ayat, "
-    "berikan lema yang betul. Format: token -> lema, satu baris setiap token."
-)
+# CRITICAL: must be BYTE-IDENTICAL to the prompt used in training.
+# Imported rather than retyped - this file previously carried a stale copy
+# asking for "token -> lema" line format, which the model was never trained
+# on and which made every answer nonsense.
+from llm import SYSTEM_PROMPT      # noqa: E402
 
 
 def load_model():
