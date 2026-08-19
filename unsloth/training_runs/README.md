@@ -5,8 +5,8 @@ model_name: training_runs
 tags:
 - generated_from_trainer
 - sft
-- unsloth
 - trl
+- unsloth
 licence: license
 ---
 
