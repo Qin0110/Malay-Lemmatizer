@@ -11,19 +11,25 @@ Install:
     pip install triton-windows      # native Windows only
     pip install unsloth
 """
-
+import os
 import argparse
 import json
 import random
 import re
 from collections import defaultdict
+from unsloth import FastLanguageModel, is_bfloat16_supported
+from unsloth.chat_templates import get_chat_template, train_on_responses_only
+from datasets import load_dataset
+from trl import SFTTrainer, SFTConfig
+from unsloth import FastLanguageModel
+from unsloth.chat_templates import get_chat_template
 
 # ----------------------------------------------------------------------------
 # CONFIG
 # ----------------------------------------------------------------------------
 
 SEED_FILE = "seed500.jsonl"
-TRAIN_FILE = "data/train_sft.jsonl"     # NOT train_chatml.jsonl - build_500.py owns that
+TRAIN_FILE = "data/training.jsonl"     # NOT train_chatml.jsonl - build_500.py owns that
 VAL_FILE = "data/val_sft.jsonl"
 VAL_SEED_FILE = "data/val_seed.jsonl"
 ADAPTER_DIR = "lemmatizer_lora"
@@ -56,7 +62,6 @@ def to_chatml(row):
 
 
 def prepare():
-    import os
     os.makedirs("data", exist_ok=True)
 
     rows = [json.loads(l) for l in open(SEED_FILE, encoding="utf-8") if l.strip()]
@@ -100,11 +105,6 @@ def prepare():
 # ----------------------------------------------------------------------------
 
 def train():
-    from unsloth import FastLanguageModel, is_bfloat16_supported
-    from unsloth.chat_templates import get_chat_template, train_on_responses_only
-    from datasets import load_dataset
-    from trl import SFTTrainer, SFTConfig
-
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=BASE_MODEL,
         max_seq_length=MAX_SEQ_LEN,
@@ -208,9 +208,6 @@ def baseline_predict(row):
 
 
 def evaluate():
-    from unsloth import FastLanguageModel
-    from unsloth.chat_templates import get_chat_template
-
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=ADAPTER_DIR, max_seq_length=MAX_SEQ_LEN,
         dtype=None, load_in_4bit=True,
