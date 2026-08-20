@@ -17,6 +17,8 @@ import json
 import random
 import re
 from collections import defaultdict
+
+import skill
 from unsloth import FastLanguageModel, is_bfloat16_supported
 from unsloth.chat_templates import get_chat_template, train_on_responses_only
 from datasets import load_dataset
@@ -29,24 +31,41 @@ from unsloth.chat_templates import get_chat_template
 # ----------------------------------------------------------------------------
 
 SEED_FILE = "seed500.jsonl"
-TRAIN_FILE = "data/training.jsonl"     # NOT train_chatml.jsonl - build_500.py owns that
-VAL_FILE = "data/val_sft.jsonl"
-VAL_SEED_FILE = "data/val_seed.jsonl"
-ADAPTER_DIR = "lemmatizer_lora"
 
 BASE_MODEL = "unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
-MAX_SEQ_LEN = 512
 CHAT_TEMPLATE = "llama-3.2"
 
 VAL_RATIO = 0.15
 SEED = 3407
 ON_WINDOWS = True                       # set False under WSL2/Linux
 
-# Must match build_500.py exactly, and be byte-identical at inference.
-SYSTEM_PROMPT = (
-    "Anda adalah pelemma bahasa Melayu. Tukarkan ayat rojak kepada ayat "
-    "berbentuk lema. Kembalikan ayat sahaja."
-)
+# v2 trains on every corpus the registry links (sources.py) and teaches the
+# model to show its derivation (skill.py). v1 trained on seed500 alone and
+# answered with a bare lemma sentence. The two are not interchangeable at
+# inference: system prompt, target format and adapter all change together, so
+# they are switched together here and nowhere else.
+USE_REASONING = True
+
+if USE_REASONING:
+    import sources
+    SYSTEM_PROMPT = skill.SYSTEM_PROMPT
+    ADAPTER_DIR = skill.ADAPTER_DIR              # lemmatizer_lora_v2
+    TRAIN_FILE = sources.OUT_TRAIN
+    VAL_FILE = sources.OUT_VAL
+    VAL_SEED_FILE = sources.OUT_VAL_SEED
+    # Reasoning targets run ~150-300 tokens against v1's ~30, and the system
+    # prompt is longer too (p95 target is 146 words). At 512 the longest rows
+    # would train truncated, teaching the model to stop mid-derivation.
+    # If this will not fit in 8GB, drop per_device_train_batch_size to 1 and
+    # raise gradient_accumulation_steps to 8 rather than lowering this.
+    MAX_SEQ_LEN = 1024
+else:
+    SYSTEM_PROMPT = skill.SYSTEM_PROMPT_V1
+    ADAPTER_DIR = "lemmatizer_lora"
+    TRAIN_FILE = "data/training.jsonl"   # NOT train_chatml.jsonl - build_500.py owns that
+    VAL_FILE = "data/val_sft.jsonl"
+    VAL_SEED_FILE = "data/val_seed.jsonl"
+    MAX_SEQ_LEN = 512
 
 
 # ----------------------------------------------------------------------------
@@ -54,6 +73,8 @@ SYSTEM_PROMPT = (
 # ----------------------------------------------------------------------------
 
 def to_chatml(row):
+    if USE_REASONING:
+        return skill.to_chatml(row, SYSTEM_PROMPT)
     return {"messages": [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": row["text"]},
@@ -63,6 +84,12 @@ def to_chatml(row):
 
 def prepare():
     os.makedirs("data", exist_ok=True)
+
+    # v2 composes its splits from the registry, so every linked corpus is
+    # rebuilt from its own file. Nothing is merged on disk by hand.
+    if USE_REASONING:
+        sources.build()
+        return
 
     rows = [json.loads(l) for l in open(SEED_FILE, encoding="utf-8") if l.strip()]
     missing = [r["id"] for r in rows if "lemma_text" not in r]
@@ -204,7 +231,17 @@ def align(pred_words, lemmas):
 
 
 def baseline_predict(row):
-    return [(row["candidates"].get(e["t"]) or [e["t"]])[0] for e in row["lemmas"]]
+    # Registry-linked rows carry no candidate lists; the token itself is then
+    # the only baseline available, which is what `candidates` falls back to.
+    cand = row.get("candidates") or {}
+    return [(cand.get(e["t"]) or [e["t"]])[0] for e in row["lemmas"]]
+
+
+def gold_rule(e):
+    """The rule tag a row asserts, however that row records it."""
+    if e.get("rule"):
+        return e["rule"]
+    return skill.rule_for(e.get("src"), e["t"], e["l"])[0]
 
 
 def evaluate():
@@ -216,34 +253,66 @@ def evaluate():
     FastLanguageModel.for_inference(model)
 
     rows = [json.loads(l) for l in open(VAL_SEED_FILE, encoding="utf-8") if l.strip()]
-    hits = defaultdict(lambda: {"model": 0, "base": 0, "n": 0})
-    exact, misaligned = 0, 0
+    hits = defaultdict(lambda: {"model": 0, "base": 0, "n": 0, "rule": 0})
+    exact, misaligned, malformed = 0, 0, 0
+    by_source = defaultdict(lambda: {"model": 0, "n": 0})
 
     for row in rows:
         msgs = [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": row["text"]}]
         ids = tokenizer.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True, return_tensors="pt").to("cuda")
-        out = model.generate(input_ids=ids, max_new_tokens=160, do_sample=False,
-                             pad_token_id=tokenizer.eos_token_id)
+        # The derivation is far longer than v1's bare sentence; too small a cap
+        # truncates mid-answer and looks like a format failure.
+        out = model.generate(input_ids=ids,
+                             max_new_tokens=400 if USE_REASONING else 160,
+                             do_sample=False, pad_token_id=tokenizer.eos_token_id)
         pred = tokenizer.decode(out[0][ids.shape[1]:], skip_special_tokens=True).strip()
 
+        # v2 answers carry their own token segmentation: one line per token, so
+        # the predicted lemmas are read off directly instead of being re-aligned
+        # by word count. That removes v1's worst failure mode, where a single
+        # multi-word lemma shifted every later token and zeroed the whole row.
+        rules = None
+        if USE_REASONING:
+            parsed = skill.parse_response(pred)
+            if not parsed["ok"]:
+                malformed += 1
+            pred_text = parsed["lemma_text"]
+            if len(parsed["steps"]) == len(row["lemmas"]):
+                aligned = [s["lemma"] for s in parsed["steps"]]
+                rules = [s["rule"] for s in parsed["steps"]]
+            else:
+                aligned = align(pred_text.split(), row["lemmas"])
+        else:
+            pred_text = pred
+            aligned = align(pred_text.split(), row["lemmas"])
+
         # Metric 1: whole-sentence exact match
-        if norm(pred.replace(" ", "")) == norm(row["lemma_text"].replace(" ", "")):
+        gold_text = row.get("lemma_text") or " ".join(e["l"] for e in row["lemmas"])
+        if norm(pred_text.replace(" ", "")) == norm(gold_text.replace(" ", "")):
             exact += 1
 
-        # Metric 2: per-token, by difficulty category
-        aligned = align(pred.split(), row["lemmas"])
         if aligned is None:
             misaligned += 1
+
+        # Metric 2: per-token, by difficulty category
         base = baseline_predict(row)
         for i, e in enumerate(row["lemmas"]):
-            d = hits[e["src"]]
+            d = hits[e.get("src") or e.get("rule") or "?"]
             d["n"] += 1
+            src_d = by_source[row.get("source", "?")]
+            src_d["n"] += 1
             if aligned and norm(aligned[i]) == norm(e["l"]):
                 d["model"] += 1
+                src_d["model"] += 1
             if norm(base[i]) == norm(e["l"]):
                 d["base"] += 1
+            # Metric 3 (v2 only): did it cite the rule that actually applied?
+            # A right lemma from the wrong rule is a lucky guess, and this is
+            # the only metric that separates the two.
+            if rules and rules[i] == gold_rule(e):
+                d["rule"] += 1
 
     print(f"\nSentence exact match: {exact}/{len(rows)} ({exact / len(rows):.1%})")
     print(f"Length misalignment:  {misaligned}/{len(rows)} ({misaligned / len(rows):.1%})\n")

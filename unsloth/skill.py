@@ -227,6 +227,43 @@ def infer_rule(token, lemma):
     return "RINGKAS", True
 
 
+# Prose -> tag. Some corpora explain a lemma in words instead of labelling it
+# ("suffix -an (noun-forming) removed"). The rule vocabulary recognises itself
+# in that prose, so those corpora can be folded in without a second format.
+# Patterns are ordered: the first match wins, and the order encodes precedence.
+# "-kah" must be read as a suffix before the word "particle" in the same
+# sentence pulls it towards PARTIKEL.
+_REASON_PATTERNS = [
+    ("KEKAL",    r"proper noun|nama khas|left in its dictionary form"),
+    ("GANDA",    r"reduplicat|penggandaan|plural(?:is|ity)?\b|repeated word|doubling"),
+    ("PANJANG",  r"elongat|lengthen|repeated letter|drawn[- ]out|extra letter|stretch"),
+    ("NOMBOR",   r"\bnumber\b|numeral|\bdigit|\btime\b|\bdate\b|money|currency"),
+    ("IMBUHAN",  r"prefix|suffix|circumfix|confix|infix|clitic|applicative|causative"
+                 r"|nominalis|verbalis|\bmeN|\bpeN|\bber-|\bter-|\bdi-|\bke-|\bse-"
+                 r"|\bmem|\bmeng|\bmeny|\bmen-|\bpem|\bpeng|\bpeny"
+                 r"|-an\b|-kan\b|-nya\b|-kah\b|-lah\b|-tah\b|-i\b"),
+    ("INGGERIS", r"english|loanword|borrow|code[- ]?switch"),
+    ("RINGKAS",  r"slang|shorthand|sms|informal|colloquial|spoken|clipping|clipped"
+                 r"|everyday|standard form|non[- ]?standard|spelling|abbreviat"
+                 r"|contract|texting|dialect|short for|standardised|standardized"),
+    ("PARTIKEL", r"particle"),
+]
+_REASON_RE = [(tag, re.compile(pat, re.I)) for tag, pat in _REASON_PATTERNS]
+
+
+def classify_reason(prose):
+    """Map a free-text explanation to a rule tag, or None if nothing matches.
+
+    Returns (tag, uncertain). `uncertain` is always False: the prose was
+    written by whoever built that corpus and names the affix explicitly, which
+    is stronger evidence than databuilder's rule guesses, not weaker.
+    """
+    for tag, rx in _REASON_RE:
+        if rx.search(prose):
+            return tag, False
+    return None
+
+
 def rule_for(src, token=None, lemma=None):
     """Map a `src` to (tag, uncertain).
 
@@ -250,7 +287,12 @@ def render_target(row):
     """
     lines = []
     for e in row["lemmas"]:
-        tag, uncertain = rule_for(e["src"], e["t"], e["l"])
+        # A corpus that already knows its rule carries it as "rule"/"unsure";
+        # everything else is derived from the `src` provenance.
+        if e.get("rule"):
+            tag, uncertain = e["rule"], bool(e.get("unsure"))
+        else:
+            tag, uncertain = rule_for(e.get("src"), e["t"], e["l"])
         lines.append("%s | %s%s | %s" % (e["t"], tag, "?" if uncertain else "", e["l"]))
     sentence = " ".join(e["l"] for e in row["lemmas"])
     return "<lema>\n%s\n</lema>\n<ayat>%s</ayat>" % ("\n".join(lines), sentence)
@@ -384,10 +426,11 @@ def _selftest(rows):
     bad = []
     for r in rows:
         p = parse_response(render_target(r))
+        want = [(e["rule"] if e.get("rule") else rule_for(e.get("src"), e["t"], e["l"])[0])
+                for e in r["lemmas"]]
         if not (p["ok"] and p["consistent"]
                 and [s["lemma"] for s in p["steps"]] == [e["l"] for e in r["lemmas"]]
-                and [s["rule"] for s in p["steps"]] == [rule_for(e["src"], e["t"], e["l"])[0]
-                                                        for e in r["lemmas"]]):
+                and [s["rule"] for s in p["steps"]] == want):
             bad.append(r.get("id", "?"))
     return bad
 
