@@ -46,8 +46,18 @@ from make_goldsheet import (malindo_lemmas, malindo_roots,   # noqa: E402
                             pick, propose)
 
 GOLD = ROOT / "data" / "gold.jsonl"
-PREDS = ROOT / "data" / "model_predictions.json"
-ADAPTER = ROOT / "unsloth" / "lemmatizer_lora"
+ADAPTER = ROOT / "unsloth" / "lemmatizer_lora"      # overridden by --adapter
+
+
+def preds_path(adapter):
+    """One cache per adapter, named after it.
+
+    A single shared cache silently went stale once already: predictions
+    generated from one adapter were still being scored after a different
+    adapter replaced it on disk. Naming the cache after the adapter makes
+    that impossible - a different model simply has no cache yet.
+    """
+    return ROOT / "data" / ("model_predictions_%s.json" % adapter.name)
 MAX_SEQ_LEN = 512
 CHAT_TEMPLATE = "llama-3.2"
 
@@ -133,7 +143,7 @@ def _import_unsloth():
         sys.path[:] = saved
 
 
-def generate_raw(rows):
+def generate_raw(rows, adapter):
     """Run the adapter and return its raw output text per sentence.
 
     Kept separate from alignment and cached to disk: a GPU pass costs
@@ -143,7 +153,7 @@ def generate_raw(rows):
     FastLanguageModel, get_chat_template = _import_unsloth()
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=str(ADAPTER), max_seq_length=MAX_SEQ_LEN,
+        model_name=str(adapter), max_seq_length=MAX_SEQ_LEN,
         dtype=None, load_in_4bit=True)
     tokenizer = get_chat_template(tokenizer, chat_template=CHAT_TEMPLATE)
     FastLanguageModel.for_inference(model)
@@ -162,10 +172,11 @@ def generate_raw(rows):
         if i % 25 == 0:
             print("   %d/%d" % (i, len(rows)))
 
-    PREDS.write_text(json.dumps(
+    cache = preds_path(adapter)
+    cache.write_text(json.dumps(
         {r["id"]: t for r, t in zip(rows, out_texts)},
         ensure_ascii=False, indent=1), encoding="utf-8")
-    print("   saved raw predictions -> %s" % PREDS.relative_to(ROOT))
+    print("   saved raw predictions -> %s" % cache.relative_to(ROOT))
     return out_texts
 
 
@@ -275,7 +286,7 @@ def pct(pair):
     return 100 * pair[0] / pair[1] if pair[1] else 0.0
 
 
-def main(with_model, reuse):
+def main(with_model, reuse, adapter):
     if not GOLD.exists():
         sys.exit("No data/gold.jsonl. Run crawl/make_goldsheet.py --collect.")
     rows = [json.loads(l) for l in GOLD.open(encoding="utf-8") if l.strip()]
@@ -297,16 +308,17 @@ def main(with_model, reuse):
 
     if with_model or reuse:
         texts = None
+        cache = preds_path(adapter)
         if reuse:
-            if not PREDS.exists():
-                sys.exit("No %s yet. Run once with --model first." % PREDS.name)
-            saved = json.loads(PREDS.read_text(encoding="utf-8"))
+            if not cache.exists():
+                sys.exit("No %s yet. Run once with --model first." % cache.name)
+            saved = json.loads(cache.read_text(encoding="utf-8"))
             missing = [r["id"] for r in rows if r["id"] not in saved]
             if missing:
                 sys.exit("Cached predictions are stale - %d gold ids missing "
                          "(e.g. %s). Re-run with --model."
                          % (len(missing), missing[:3]))
-            print("reusing cached predictions from %s\n" % PREDS.name)
+            print("reusing cached predictions from %s\n" % cache.name)
             texts = [saved[r["id"]] for r in rows]
         elif not ADAPTER.exists():
             print("No adapter at %s - skipping finetune.\n" % ADAPTER)
@@ -375,8 +387,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--model", action="store_true",
                    help="also evaluate the fine-tuned adapter (needs GPU)")
+    p.add_argument("--adapter", default="lemmatizer_lora",
+                   help="adapter folder under unsloth/ (default lemmatizer_lora)")
     p.add_argument("--reuse", action="store_true",
                    help="score cached predictions instead of re-running the "
                         "model (no GPU needed)")
     a = p.parse_args()
-    main(a.model, a.reuse)
+    main(a.model, a.reuse, ROOT / "unsloth" / a.adapter)

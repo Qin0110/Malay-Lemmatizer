@@ -5,8 +5,8 @@ model_name: training_runs
 tags:
 - generated_from_trainer
 - sft
-- trl
 - unsloth
+- trl
 licence: license
 ---
 
@@ -36,10 +36,10 @@ This model was trained with SFT.
 ### Framework versions
 
 - TRL: 0.24.0
-- Transformers: 5.5.0
+- Transformers: 4.57.3
 - Pytorch: 2.11.0+cu126
 - Datasets: 4.3.0
-- Tokenizers: 0.22.2
+- Tokenizers: 0.22.1
 
 ## Citations
 

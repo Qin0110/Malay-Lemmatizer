@@ -1,8 +1,17 @@
 #!/usr/bin/env python
 """
-Interactive chat interface for the Malay Rojak Lemmatizer.
-Usage: python chat.py
+Try the Malay rojak lemmatiser on your own sentences.
+
+    python chat.py                                   # interactive
+    python chat.py "aku dh xleh handle keje tu"      # one sentence, then exit
+    python chat.py --adapter lemmatizer_lora_yt      # pick which model
+
+There is more than one adapter in this repo and they are NOT
+interchangeable - each was trained with its own system prompt and target
+format. Defaults to lemmatizer_lora; pass --adapter for the others.
 """
+
+import argparse
 
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template
@@ -19,11 +28,11 @@ CHAT_TEMPLATE = "llama-3.2"
 from llm import SYSTEM_PROMPT      # noqa: E402
 
 
-def load_model():
+def load_model(adapter_dir=ADAPTER_DIR):
     """Load the fine-tuned model and tokenizer."""
-    print("Loading model from", ADAPTER_DIR)
+    print("Loading model from", adapter_dir)
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=ADAPTER_DIR,
+        model_name=adapter_dir,
         max_seq_length=MAX_SEQ_LEN,
         dtype=None,
         load_in_4bit=True,
@@ -63,9 +72,9 @@ def lemmatize(model, tokenizer, text):
     return response
 
 
-def interactive_mode():
+def interactive_mode(adapter_dir=ADAPTER_DIR):
     """Run interactive chat loop."""
-    model, tokenizer = load_model()
+    model, tokenizer = load_model(adapter_dir)
 
     print("=" * 70)
     print("Malay Rojak Lemmatizer - Interactive Mode")
@@ -97,4 +106,18 @@ def interactive_mode():
 
 
 if __name__ == "__main__":
-    interactive_mode()
+    p = argparse.ArgumentParser()
+    p.add_argument("sentence", nargs="*",
+                   help="lemmatise this and exit; omit for interactive mode")
+    p.add_argument("--adapter", default=ADAPTER_DIR,
+                   help="adapter folder to load (default %s)" % ADAPTER_DIR)
+    a = p.parse_args()
+
+    if a.sentence:
+        text = " ".join(a.sentence)
+        model, tokenizer = load_model(a.adapter)
+        print()
+        print("in  :", text)
+        print("out :", lemmatize(model, tokenizer, text).strip())
+    else:
+        interactive_mode(a.adapter)

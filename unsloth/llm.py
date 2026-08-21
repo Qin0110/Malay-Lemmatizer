@@ -44,7 +44,11 @@ ON_WINDOWS = True                       # set False under WSL2/Linux
 # answered with a bare lemma sentence. The two are not interchangeable at
 # inference: system prompt, target format and adapter all change together, so
 # they are switched together here and nowhere else.
-USE_REASONING = True
+# Defaults to v2. Override per-shell rather than editing this line, so two
+# people can work on different variants without conflicting in git:
+#     PowerShell   $env:USE_REASONING = "0"
+#     bash         USE_REASONING=0 python llm.py --train
+USE_REASONING = os.environ.get("USE_REASONING", "1") != "0"
 
 if USE_REASONING:
     import sources
@@ -61,7 +65,11 @@ if USE_REASONING:
     MAX_SEQ_LEN = 1024
 else:
     SYSTEM_PROMPT = skill.SYSTEM_PROMPT_V1
-    ADAPTER_DIR = "lemmatizer_lora"
+    # Own directory on purpose. `lemmatizer_lora` is shared, and two people
+    # training into the same filename already cost one adapter (18 Aug run
+    # overwritten by 20 Aug). Keeping the YouTube v1 run separate means all
+    # three adapters can coexist and be compared.
+    ADAPTER_DIR = "lemmatizer_lora_yt"
     TRAIN_FILE = "data/training.jsonl"   # NOT train_chatml.jsonl - build_500.py owns that
     VAL_FILE = "data/val_sft.jsonl"
     VAL_SEED_FILE = "data/val_seed.jsonl"
