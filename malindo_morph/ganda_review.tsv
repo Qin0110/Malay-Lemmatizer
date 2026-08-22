@@ -1,0 +1,95 @@
+# Review these. keep = stay reduplicated (rama-rama). resolve = go to base (budak-budak -> budak).
+# Edit the 'decision' column only, then re-run databuilder.py.
+count	form	decision	note
+17	betul-betul	resolve	UNSURE - please check
+12	apa-apa	keep	
+6	iras-iras	keep	
+6	kadang-kadang	keep	
+6	lain-lain	keep	
+5	lama-lama	keep	UNSURE - please check
+5	masing-masing	keep	
+4	baik-baik	keep	UNSURE - please check
+4	banyak-banyak	resolve	
+4	budak-budak	resolve	
+4	dua-dua	resolve	
+4	macam-macam	keep	UNSURE - please check
+4	malam-malam	keep	UNSURE - please check
+4	mula-mula	keep	
+4	tiba-tiba	keep	
+3	awal-awal	resolve	
+3	biasa-biasa	resolve	
+3	dulu-dulu	resolve	
+3	gila-gila	resolve	
+3	lagi-lagi	resolve	
+3	last-last	resolve	
+3	lebih-lebih	resolve	
+3	sangat-sangat	resolve	
+3	sikit-sikit	resolve	
+2	atas-atas	resolve	UNSURE - please check
+2	barang-barang	resolve	
+2	buat-buat	keep	
+2	kanak-kanak	keep	
+2	mana-mana	keep	
+2	murah-murah	resolve	
+2	potong-potong	resolve	
+2	ramai-ramai	resolve	
+2	satu-satu	keep	UNSURE - please check
+2	sedar-sedar	keep	
+2	tahu-tahu	keep	
+2	tiap-tiap	keep	
+1	alang-alang	keep	
+1	ayam-ayam	resolve	
+1	baru-baru	keep	
+1	bila-bila	keep	
+1	bising-bising	resolve	
+1	borak-borak	resolve	
+1	buang-buang	resolve	
+1	buka-buka	resolve	
+1	bukan-bukan	keep	
+1	buli-buli	keep	
+1	buruk-buruk	resolve	
+1	calang-calang	keep	
+1	cantik-cantik	resolve	
+1	dan-dan	keep	
+1	diam-diam	keep	
+1	empat-empat	resolve	
+1	gara-gara	keep	
+1	gelap-gelap	resolve	
+1	gula-gula	keep	
+1	hati-hati	keep	
+1	hebat-hebat	resolve	
+1	jauh-jauh	resolve	
+1	kecik-kecik	resolve	
+1	kerap-kerap	resolve	
+1	laju-laju	resolve	
+1	lawak-lawak	resolve	
+1	liku-liku	keep	
+1	mahal-mahal	resolve	
+1	main-main	keep	UNSURE - please check
+1	makan-makan	resolve	
+1	mentang-mentang	keep	
+1	nenek-nenek	resolve	UNSURE - please check
+1	ngam-ngam	keep	
+1	paru-paru	keep	
+1	pegang-pegang	resolve	
+1	pelik-pelik	resolve	
+1	pendek-pendek	resolve	
+1	pilih-pilih	resolve	
+1	pura-pura	keep	
+1	pusing-pusing	resolve	
+1	putus-putus	resolve	
+1	sama-sama	keep	UNSURE - please check
+1	sedap-sedap	resolve	
+1	sehat-sehat	resolve	
+1	senyum-senyum	resolve	
+1	siap-siap	resolve	
+1	suam-suam	keep	
+1	suka-suka	resolve	
+1	sumpah-sumpah	resolve	
+1	sungguh-sungguh	keep	
+1	susah-susah	resolve	
+1	tapak-tapak	resolve	
+1	terang-terang	keep	
+1	tinggi-tinggi	resolve	
+1	tunggu-tunggu	resolve	
+1	undang-undang	keep	

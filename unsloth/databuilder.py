@@ -16,6 +16,7 @@ review_queue.tsv before treating any of this as ground truth.
 """
 
 import json
+import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -279,6 +280,31 @@ DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})$")
 PCT_RE = re.compile(r"^(\d+(?:\.\d+)?)%$")
 
 
+# Reduplications that ARE the lemma, one per line, "#" for comments. Kept in a
+# data file rather than inline like ROOTS because the list is judgement, not
+# fact: which doublings have drifted far enough from their base to count is a
+# call a Malay speaker makes and revises. Regenerate the candidates with
+# malindo_morph, then edit data/ganda_review.tsv and rebuild.
+#
+# Resolved against __file__ so it loads whatever the caller's cwd is, and
+# degrades to the old resolve-everything behaviour if the file is missing
+# rather than taking the whole build down.
+GANDA_SEMU_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               os.pardir, "malindo_morph", "ganda_semu.txt")
+
+
+def load_ganda_semu(path=GANDA_SEMU_FILE):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return {line.strip().lower() for line in fh
+                    if line.strip() and not line.startswith("#")}
+    except OSError:
+        return set()
+
+
+GANDA_SEMU = load_ganda_semu()
+
+
 def lemma_of(tok):
     """Return (lemma, lang, src). src flags what needs human review."""
     w = tok.lower()
@@ -308,12 +334,23 @@ def lemma_of(tok):
     if w in SLANG:
         return SLANG[w], "ms", "slang"
 
-    # reduplication: budak2 / budak-budak
+    # Reduplication: budak2 / budak-budak. Two outcomes, not one.
+    #
+    # Most reduplication is plural or intensive, and the base carries the
+    # meaning: budak-budak -> budak, lagu-lagu -> lagu. But kata ganda semu is
+    # only ever a word in its doubled form -- "rama" is not a small butterfly,
+    # and "gula-gula" is candy rather than sugars -- so resolving those throws
+    # the word away. GANDA_SEMU holds the ones that must survive intact.
     if w.endswith("2") and len(w) > 3:
+        doubled = "%s-%s" % (w[:-1], w[:-1])
+        if doubled in GANDA_SEMU:
+            return doubled, "ms", "reduplication"
         return lemma_of(w[:-1])[0], "ms", "reduplication"
     if "-" in w:
         a, _, b = w.partition("-")
         if a == b and a:
+            if w in GANDA_SEMU:
+                return w, "ms", "reduplication"
             return lemma_of(a)[0], "ms", "reduplication"
 
     if w in ROOTS:

@@ -72,9 +72,8 @@ if st.button("Lemmatize"):
     if not user_input.strip():
         st.warning("Please enter some text first.")
     else:
-        normalizer = Normalizer()
+        normalizer = Normalizer(dictionary)
         tokenizer = Tokenizer()
-        dictionary = Dictionary()
 
         user_input = normalizer.normalize(user_input)
         tokens = tokenizer.tokenize(user_input)
