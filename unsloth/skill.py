@@ -97,14 +97,12 @@ RULES = {
     "KAMUS":    "kata dasar, sudah berbentuk lema",
     "RINGKAS":  "singkatan atau slanga, dikembangkan",
     "IMBUHAN":  "imbuhan dibuang untuk dapat kata dasar",
-    # SETTLED: both halves now resolve reduplication to its base (budak2 ->
-    # budak, lagu-lagu -> lagu) EXCEPT kata ganda semu, which is only ever a
-    # word doubled ("rama-rama" is a butterfly; "rama" is not a small one).
-    # Those keep the doubled form. The exceptions are listed in
-    # malindo_morph/ganda_semu.txt, read by both databuilder.lemma_of and
-    # Dictionary.morphological_analysis so the two cannot drift apart again.
-    "GANDA":    "penggandaan diselesaikan kepada kata dasar, "
-                "kecuali kata ganda semu yang kekal berganda",
+    # NOTE: databuilder resolves reduplication to its base (budak2 -> budak,
+    # makan-makan -> makan), but malindo_morph/dictionary.py deliberately KEEPS
+    # it (makan-makan -> makan-makan). The two halves of this project disagree.
+    # This gloss follows databuilder, because that is what the model is trained
+    # on -- but the disagreement is real and worth settling.
+    "GANDA":    "penggandaan diselesaikan kepada kata dasar",
     "PANJANG":  "huruf berulang dipendekkan",
     "PARTIKEL": "partikel wacana, sengaja tidak ditukar",
     "INGGERIS": "kata Inggeris, dikekalkan",

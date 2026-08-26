@@ -6,9 +6,9 @@ from Preprocess.tokenizer import Tokenizer
 
 string = 'boleh dtg 8pagi esok tak atau minggu depan? 2 oktober 2019 2pm, tlong bayar rm 3.2k sekali tau'
 
-dictionary = Dictionary()
-normalizer = Normalizer(dictionary)
+normalizer = Normalizer()
 tokenizer = Tokenizer()
+dictionary = Dictionary()
 
 normalized_string = normalizer.normalize(string)
 tokens = tokenizer.tokenize(normalized_string)

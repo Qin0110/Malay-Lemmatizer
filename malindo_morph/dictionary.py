@@ -1,6 +1,4 @@
 import os
-from collections import Counter
-
 import pandas as pd
 
 from Preprocess.tokenizer import Tokenizer
@@ -26,8 +24,6 @@ class Dictionary:
         ]
 
         self._lexicon = None
-        self._redup_index = None
-        self.ganda_semu = self.load_ganda_semu()
         self.df = self.load()
 
     def load(self):
@@ -47,28 +43,6 @@ class Dictionary:
         df["surface_lower"] = df["surface"].str.lower()
         return df
 
-    GANDA_SEMU_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "ganda_semu.txt")
-
-    def load_ganda_semu(self, path=None):
-        """Reduplications that are themselves the lemma, one per line.
-
-        MALINDO cannot supply this. It files "rama" under the headword "rama"
-        exactly as it files "budak" under "budak", so no column separates
-        "rama-rama" (a butterfly, never a repeated "rama") from "budak-budak"
-        (simply more than one "budak"). The distinction is semantic, so the
-        list is curated; ganda_review.tsv holds the borderline calls.
-
-        A missing file degrades to resolving everything, which is what this
-        code did before the list existed, rather than failing the load.
-        """
-        try:
-            with open(path or self.GANDA_SEMU_PATH, encoding="utf-8") as fh:
-                return {line.strip().lower() for line in fh
-                        if line.strip() and not line.startswith("#")}
-        except OSError:
-            return set()
-
     def surface_lexicon(self):
         """Every surface form MALINDO knows, lowercased.
 
@@ -78,62 +52,6 @@ class Dictionary:
         if self._lexicon is None:
             self._lexicon = set(self.df["surface_lower"].dropna())
         return self._lexicon
-
-    def reduplication_index(self):
-        """Map a reduplication's first element to the full forms MALINDO attests.
-
-        The "budak2" shorthand writes only the first element and leaves the
-        reader to supply the second, but which second element is correct is
-        lexical, not mechanical. "berjalan2" is "berjalan-jalan" -- the prefix
-        is not repeated -- while "pelajar2" is "pelajar-pelajar", where it is;
-        and "berita2" is "berita-berita" because "ber-" there is not a prefix
-        at all. Rather than hand-code that split and get those three classes
-        wrong, ask MALINDO what it actually records for each first element.
-
-        Keyed by (first element, trailing enclitic) so "orang2" and "orang2an"
-        resolve to "orang-orang" and "orang-orangan" separately. Values count
-        rows per surface form: MALINDO carries one dictionary row plus one row
-        per corpus attestation, so the count is a weak frequency signal the
-        caller uses to rank competing expansions.
-        """
-        if self._redup_index is not None:
-            return self._redup_index
-
-        def value(cell):
-            if pd.isna(cell):
-                return ""
-            cell = str(cell).strip()
-            return "" if cell == "0" else cell
-
-        index = {}
-        for surface, suffix, circumfix, redup in zip(
-            self.df["surface_lower"],
-            self.df["suffix"],
-            self.df["circumfix"],
-            self.df["reduplication"],
-        ):
-            # Only rows MALINDO marks as reduplicated, so hyphenated compounds
-            # ("mata-hari") and names cannot pose as expansions.
-            if not value(redup) or pd.isna(surface):
-                continue
-            parts = str(surface).split("-")
-            if len(parts) != 2 or not all(parts):
-                continue
-
-            # The enclitic rides in whichever column MALINDO used: "-an" lands
-            # in suffix, but "se--nya" and "ke--an" put it after the "--".
-            suffix, circumfix = value(suffix), value(circumfix)
-            if suffix:
-                tail = suffix.lstrip("-")
-            elif "--" in circumfix:
-                tail = circumfix.split("--", 1)[1]
-            else:
-                tail = ""
-
-            index.setdefault((parts[0], tail), Counter())[str(surface)] += 1
-
-        self._redup_index = index
-        return index
 
     def morphological_analysis(self, word):
         grammar = self.df.loc[self.df["surface_lower"] == word.lower()]
@@ -180,24 +98,12 @@ class Dictionary:
         # The "root" column holds the actual base in both cases, so prefer it
         # and fall back to the headword only when root is missing.
         #
-        # Reduplication is the exception, and it splits two ways.
-        #
-        # A full X-X doubling is usually plural or intensive, and "root" is the
-        # lemma: budak-budak -> budak, lagu-lagu -> lagu. Kata ganda semu is
-        # not -- "rama-rama" is a butterfly and "rama" is not a small one --
-        # so those keep the doubled form. MALINDO's headword cannot make the
-        # call (it lists "budak-budak" as an entry too), so ganda_semu decides.
-        #
-        # Partial and rhythmic reduplication ("tukar-menukar", "muda-mudi",
-        # "berjam-jam") is left on the headword as before: the two halves
-        # differ, so there is no base to collapse onto.
+        # Reduplication is the exception. "root" collapses "makan-makan" to
+        # "makan", losing the reduplication the surface form carries, so for
+        # rows MALINDO marks as reduplicated keep the headword instead. field()
+        # already takes the first alternant of "gunting@menggunting".
         if field("reduplication") not in ("", "0"):
-            halves = word.lower().split("-")
-            if len(halves) == 2 and halves[0] == halves[1]:
-                lemma = (word.lower() if word.lower() in self.ganda_semu
-                         else field("root") or lemma)
-            else:
-                lemma = field("lemma") or field("root") or lemma
+            lemma = field("lemma") or field("root") or lemma
         else:
             lemma = field("root") or lemma
 
