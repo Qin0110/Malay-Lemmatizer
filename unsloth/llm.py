@@ -209,7 +209,12 @@ def train():
 
     model.save_pretrained(ADAPTER_DIR)
     tokenizer.save_pretrained(ADAPTER_DIR)
-    print(f"Adapter saved to {ADAPTER_DIR}/")
+    # Record which skill this run trained on, in the adapter itself. chat.py
+    # reads it back, so an adapter can never again be loaded with the wrong
+    # system prompt because a shell happened to have USE_REASONING set
+    # differently from the one that trained it.
+    skill.write_version(ADAPTER_DIR, "v2" if USE_REASONING else "v1")
+    print(f"Adapter saved to {ADAPTER_DIR}/ (skill {'v2' if USE_REASONING else 'v1'})")
 
 
 # ----------------------------------------------------------------------------

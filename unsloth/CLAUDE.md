@@ -103,16 +103,76 @@ The fine-tune is being asked to fix everything EXCEPT "dict" category tokens.
 - Uses bf16 on Ada architecture, fp16 fallback for older GPUs
 - `gpu.py` available for CUDA verification
 
+## The Skill (skill.py)
+
+`skill.py` is what the model is told, what it must not do, and the shape of
+what it answers. It is the single source for all three - nothing else in the
+repo may retype a system prompt.
+
+```bash
+python skill.py --card                    # the instructions the model is given
+python skill.py --rules                   # the nine rule tags, ms + en
+python skill.py --adapter lemmatizer_lora_yt   # which prompt this adapter needs
+python skill.py --score                   # how accurate the derived tags are
+python skill.py --derive "IN" "OUT"       # rule table for a pasted answer, no GPU
+```
+
+The prompt has three parts, and each earns its place:
+
+1. **Instructions** - one line per token, with the rule that produced the lemma.
+2. **A closed rule vocabulary** (`RULES`) - nine tags, not free prose. A 3B model
+   asked to explain itself writes fluent wrong explanations; asked to pick one of
+   nine tags it mostly picks right. Tags are also gradeable against the `src`
+   field the corpora already carry, which prose is not.
+3. **A `JANGAN:` list** - every entry is a failure this pipeline actually
+   produces, not a generic caution: translating to English (the base model's
+   default reading), answering the question instead of lemmatising it,
+   drifting off one-line-per-token (which makes `llm.align()` give up and
+   scores the whole row zero), normalising discourse particles, stripping
+   affixes off roots that merely look affixed ("dengan" -> "gan"), and
+   splitting reduplication into two words.
+
 ## Output Format Contract
 
-The model MUST generate this exact format:
+There are two, and they are not interchangeable. Which one applies is decided
+by the adapter, via `skill.prompt_for()`.
+
+**v1** (`lemmatizer_lora`, `lemmatizer_lora_yt`) - a bare lemma sentence, no
+per-token output. This is unauditable on its own: when it returns "jalan" for
+"berjalan" you cannot tell whether it stripped a prefix, hit the lexicon, or
+guessed.
+
+**v2** (`lemmatizer_lora_v2`) - the derivation, parsed by `LINE_RE` in skill.py:
+
 ```
-token -> lemma
-token -> lemma
-...
+<lema>
+token | PERATURAN | lema
+</lema>
+<ayat>ayat lema penuh</ayat>
 ```
 
-Parsed by LINE_RE regex in llm.py:204. Any deviation counts as format failure. Multi-word lemmas allowed (e.g., "xleh" -> "tidak boleh").
+Multi-word lemmas are allowed ("xleh" -> "tidak boleh"). A `?` after the rule
+marks low confidence. `skill.parse_response()` is deliberately lenient about
+everything except the parts that carry meaning.
+
+chat.py shows a rule table for both. For v2 the tags are the model's own claim.
+For v1 they are re-derived after the fact by `skill.derive_steps()` from the
+token/lemma pairs, and labelled `[nota]` so the two are never confused.
+`python skill.py --score` measures that derivation against the corpus labels:
+the six rules that explain a *change* (KAMUS, RINGKAS, IMBUHAN, GANDA,
+PARTIKEL, NOMBOR) score 95-100%; INGGERIS and KEKAL are both "left alone" and
+separating them is language identification, a different problem.
+
+**Never retype a system prompt.** `chat.py` once carried a stale copy asking
+for a `token -> lemma` line format the model had never been trained on, and
+every answer came out nonsense. Importing it from `llm.py` replaced that with a
+subtler version of the same bug: `llm.py` picks v1 or v2 from the
+`USE_REASONING` environment variable, which describes a training run, so
+`chat.py --adapter lemmatizer_lora_yt` was handed the v2 prompt whenever that
+variable was unset. Ask the adapter: `skill.prompt_for(adapter_dir)`. New
+adapters are stamped with `skill.json` at save time; the four that predate the
+stamp are listed in `skill.ADAPTERS`. `test_model.py` still holds its own
+retyped copy - it matches today, but it is the next one to go stale.
 
 ## Files and Directories
 

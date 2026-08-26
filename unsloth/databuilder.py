@@ -21,7 +21,10 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
-UPLOADS = "sentidata"
+# Resolved against __file__, like GANDA_SEMU_FILE below: skill.py induces
+# vocabulary from these at inference time, and it can be invoked from any
+# directory. A cwd-relative path would silently induce nothing instead.
+UPLOADS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sentidata")
 MIX = ["mix.train", "mix.valid", "mix.test"]
 TSV = ["train_labeled.tsv", "valid_labeled.tsv", "test_labeled.tsv"]
 TARGET_ROWS = 500
@@ -413,7 +416,8 @@ def clean(s):
     return s
 
 
-def mine():
+def read_uploads():
+    """Every raw line under sentidata/, as plain text."""
     raw = []
     for f in MIX:
         with open(f"{UPLOADS}/{f}", encoding="utf-8") as fh:
@@ -422,9 +426,21 @@ def mine():
         with open(f"{UPLOADS}/{f}", encoding="utf-8") as fh:
             for l in fh:
                 raw += split_sentences(l.rsplit("\t", 1)[0])
+    return raw
 
-    # Induce vocabulary before annotating: pure-English lines vs Malay-dominant
-    # lines give us evidence about which register each token belongs to.
+
+def induce_from_uploads(raw=None, quiet=False):
+    """Populate EN_VOCAB / MS_VOCAB from sentidata. Returns both.
+
+    Pure-English lines vs Malay-dominant lines give evidence about which
+    register each token belongs to. Split out of mine() so that inference can
+    reach it: skill.derive_rule() has to answer "is this English?" for a token
+    the model left unchanged, and the only defensible answer is the one the
+    ANNOTATION used. Deciding it differently there would make derived tags
+    disagree with the corpus labels for reasons that have nothing to do with
+    the model. Costs about 0.06s and is done once per process.
+    """
+    raw = read_uploads() if raw is None else raw
     en_lines, ms_lines = [], []
     for s in raw:
         c = clean(s)
@@ -437,8 +453,15 @@ def mine():
         elif hits / len(toks) >= 0.25:
             ms_lines.append(c)
     induce_vocab(en_lines, ms_lines)
-    print(f"induced vocab: {len(EN_VOCAB)} en / {len(MS_VOCAB)} ms "
-          f"(from {len(en_lines)} en / {len(ms_lines)} ms lines)")
+    if not quiet:
+        print(f"induced vocab: {len(EN_VOCAB)} en / {len(MS_VOCAB)} ms "
+              f"(from {len(en_lines)} en / {len(ms_lines)} ms lines)")
+    return EN_VOCAB, MS_VOCAB
+
+
+def mine():
+    raw = read_uploads()
+    induce_from_uploads(raw)
 
     seen, cands = set(), []
     for s in raw:
