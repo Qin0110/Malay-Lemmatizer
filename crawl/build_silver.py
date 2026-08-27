@@ -40,7 +40,10 @@ CORPUS = ROOT / "data" / "corpus.jsonl"
 GOLD = ROOT / "data" / "gold.jsonl"
 GOLD_POOL = ROOT / "data" / "gold_pool.jsonl"
 SILVER = ROOT / "data" / "silver.jsonl"
-TRAIN_OUT = ROOT / "unsloth" / "data" / "train_sft.jsonl"
+# These must match what unsloth/llm.py reads in its v1 branch, or a rebuild
+# here silently leaves training on the previous dataset. It read train_sft
+# originally and was later repointed at training.jsonl.
+TRAIN_OUT = ROOT / "unsloth" / "data" / "training.jsonl"
 VAL_OUT = ROOT / "unsloth" / "data" / "val_sft.jsonl"
 
 VAL_RATIO = 0.12

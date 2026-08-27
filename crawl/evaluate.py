@@ -158,6 +158,14 @@ def generate_raw(rows, adapter):
     tokenizer = get_chat_template(tokenizer, chat_template=CHAT_TEMPLATE)
     FastLanguageModel.for_inference(model)
 
+    # Llama 3.2 ships generation_config.max_length = 131072, and we pass
+    # max_new_tokens instead. transformers 5.x warns about the pair on EVERY
+    # call, which buries the progress output under 150 identical paragraphs.
+    # Clearing the one we are not using silences it without changing behaviour
+    # - max_new_tokens already took precedence.
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.max_length = None
+
     out_texts = []
     for i, row in enumerate(rows, 1):
         msgs = [{"role": "system", "content": SYSTEM_PROMPT},
@@ -320,11 +328,11 @@ def main(with_model, reuse, adapter):
                          % (len(missing), missing[:3]))
             print("reusing cached predictions from %s\n" % cache.name)
             texts = [saved[r["id"]] for r in rows]
-        elif not ADAPTER.exists():
-            print("No adapter at %s - skipping finetune.\n" % ADAPTER)
+        elif not adapter.exists():
+            print("No adapter at %s - skipping finetune.\n" % adapter)
         else:
-            print("running the fine-tuned model...")
-            texts = generate_raw(rows)
+            print("running %s ...\n" % adapter.name)
+            texts = generate_raw(rows, adapter)
 
         if texts is not None:
             results["finetune"] = score(rows, align_all(rows, texts))

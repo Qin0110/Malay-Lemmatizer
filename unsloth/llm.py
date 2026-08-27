@@ -67,9 +67,10 @@ else:
     SYSTEM_PROMPT = skill.SYSTEM_PROMPT_V1
     # Own directory on purpose. `lemmatizer_lora` is shared, and two people
     # training into the same filename already cost one adapter (18 Aug run
-    # overwritten by 20 Aug). Keeping the YouTube v1 run separate means all
-    # three adapters can coexist and be compared.
-    ADAPTER_DIR = "lemmatizer_lora_yt"
+    # overwritten by 20 Aug). Override per-run to keep experiments side by
+    # side instead of overwriting the previous one:
+    #     $env:ADAPTER_DIR = "lemmatizer_lora_yt8k"
+    ADAPTER_DIR = os.environ.get("ADAPTER_DIR", "lemmatizer_lora_yt")
     TRAIN_FILE = "data/training.jsonl"   # NOT train_chatml.jsonl - build_500.py owns that
     VAL_FILE = "data/val_sft.jsonl"
     VAL_SEED_FILE = "data/val_seed.jsonl"

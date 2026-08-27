@@ -110,6 +110,14 @@ def load_model(adapter_dir=ADAPTER_DIR, override="auto"):
     )
     tokenizer = get_chat_template(tokenizer, chat_template=CHAT_TEMPLATE)
     FastLanguageModel.for_inference(model)
+
+    # Llama 3.2 ships generation_config.max_length = 131072 and we pass
+    # max_new_tokens instead. transformers 5.x warns about the pair on every
+    # generate() call, which puts a paragraph of noise above each answer.
+    # max_new_tokens already wins; clearing the unused one only quiets it.
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.max_length = None
+
     print("Model loaded successfully!\n")
     return model, tokenizer, system_prompt, version
 
@@ -242,8 +250,10 @@ if __name__ == "__main__":
                    help="print every preprocessing stage")
     p.add_argument("--numbers", default="strip", choices=NUMBER_POLICIES,
                    help="what preprocessing does with digits (default: strip)")
-    p.add_argument("--lang", default="ms", choices=("ms", "en"),
-                   help="language of the rule glosses (default: ms)")
+    p.add_argument("--lang", default="both", choices=("ms", "en", "both"),
+                   help="rule-gloss language. Default 'both': tags as "
+                        "RINGKAS/SHORT with English descriptions. Use 'ms' for "
+                        "Malay-only output.")
     p.add_argument("--plain", action="store_true",
                    help="print the model's answer only, no derivation table")
     p.add_argument("--skill", default="auto", choices=("auto", "v1", "v2"),

@@ -76,6 +76,8 @@ ADAPTERS = {
     "lemmatizer_lora_yt":        "v1",   # YouTube crawl run
     "lemmatizer_lora_yt_prev":   "v1",
     "lemmatizer_lora_yt_backup": "v1",
+    "lemmatizer_lora_yt_2640":   "v1",   # YouTube run, 2640 training rows
+    "lemmatizer_lora_yt8k":      "v1",   # same data, 7040 rows - the --n 8000 run
     "lemmatizer_lora_v2":        "v2",   # == ADAPTER_DIR above
 }
 
@@ -716,8 +718,36 @@ def derive_steps(tokens, lemma_text):
 # EXPLAIN: tag -> prose, at display time
 # ---------------------------------------------------------------------------
 
+# English names for the tags themselves. The Malay tag stays canonical - it is
+# what the model is trained to emit and what parse_response() matches on - so
+# these are display-only, for readers who do not read Malay.
+# Spelled out in full, not abbreviated: the point of showing an English name
+# is that a reader who does not know the Malay tag can understand it at a
+# glance, and "REDUP" needs as much explaining as "GANDA" did.
+TAGS_EN = {
+    "KAMUS": "ROOT",
+    "RINGKAS": "ABBREVIATION",
+    "IMBUHAN": "AFFIX",
+    "GANDA": "REDUPLICATION",
+    "PANJANG": "ELONGATION",
+    "PARTIKEL": "PARTICLE",
+    "INGGERIS": "ENGLISH",
+    "NOMBOR": "NUMBER",
+    "KEKAL": "UNRECOGNISED",
+}
+
+
+def tag_label(rule, uncertain=False, lang="ms"):
+    """The tag as displayed. lang="both" renders it as RINGKAS/SHORT."""
+    tag = rule
+    if lang == "both" and rule in TAGS_EN:
+        tag = "%s/%s" % (rule, TAGS_EN[rule])
+    return tag + ("?" if uncertain else "")
+
+
 def explain(rule, uncertain=False, lang="ms"):
-    gloss = (RULES if lang == "ms" else RULES_EN).get(rule, "peraturan tidak dikenali")
+    table = RULES if lang == "ms" else RULES_EN      # "both" glosses in English
+    gloss = table.get(rule, "peraturan tidak dikenali")
     if uncertain:
         gloss += " (tidak pasti)" if lang == "ms" else " (low confidence)"
     return gloss
@@ -769,11 +799,12 @@ def format_result(parsed, lang="ms"):
 
     w_tok = max(len(s["token"]) for s in parsed["steps"])
     w_lem = max(len(s["lemma"]) for s in parsed["steps"])
+    tags = [tag_label(s["rule"], s["uncertain"], lang) for s in parsed["steps"]]
+    w_tag = max(9, max(len(t) for t in tags))
     out = []
-    for s in parsed["steps"]:
-        tag = s["rule"] + ("?" if s["uncertain"] else "")
-        out.append("  %-*s  ->  %-*s  %-9s %s" % (
-            w_tok, s["token"], w_lem, s["lemma"], tag,
+    for s, tag in zip(parsed["steps"], tags):
+        out.append("  %-*s  ->  %-*s  %-*s %s" % (
+            w_tok, s["token"], w_lem, s["lemma"], w_tag, tag,
             explain(s["rule"], s["uncertain"], lang)))
 
     out.append("")
