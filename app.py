@@ -188,16 +188,26 @@ with st.sidebar:
 
 lex, roots = load_lexicons()
 
-text = st.text_area(
-    "Sentence",
-    height=80,
-    placeholder="aku dh xleh handle keje tu la weh",
-)
+# A form, not a bare text_area + button. Streamlit only commits a text_area's
+# value when it loses focus, so typing and clicking in one motion sends the
+# click before the text: the first press appears to do nothing and you have to
+# click twice. Inside a form both are submitted together, and Ctrl+Enter works.
+with st.form("lemmatise"):
+    text = st.text_area(
+        "Sentence",
+        height=80,
+        placeholder="Sy nk yg tu blh tk.",
+    )
+    submitted = st.form_submit_button("Lemmatise", type="primary")
 
-if st.button("Lemmatise", type="primary") and text.strip():
+if submitted:
+    if not text.strip():
+        st.warning("Type a sentence first.")
+        st.stop()
     tokens = WORD_RE.findall(text.lower())
     if not tokens:
-        st.warning("Nothing to lemmatise.")
+        st.warning("Nothing left to lemmatise - try letters, not only "
+                   "digits or punctuation.")
         st.stop()
 
     md = run_malindo(tokens, lex, roots)
