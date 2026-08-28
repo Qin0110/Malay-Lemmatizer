@@ -112,6 +112,47 @@ def load_model(adapter_name):
         sys.path[:] = saved
 
 
+def align_to_tokens(tokens, sentence, reference):
+    """Line the model's answer up with the input tokens, one row each.
+
+    The model returns a sentence, not a token list, and its length can drift
+    from the input: it expands "xleh" into "tidak boleh", or spells a numeral
+    out. Two cases:
+
+      counts agree   -> positional, one word per token.
+      counts differ  -> match the model's words against the RULE pipeline's
+                        output rather than against the source tokens. Both
+                        are lemma sequences and mostly agree, so a longest-
+                        common-subsequence lines them up; matching against
+                        the raw tokens would fail on every word the model
+                        correctly changed, which is most of them.
+
+    A rule lemma can itself be several words ("tidak boleh"), so each
+    reference word remembers which token it belongs to. Anything left
+    unmatched comes back as None rather than being guessed at.
+    """
+    words = sentence.split()
+    if len(words) == len(tokens):
+        return words
+
+    import difflib
+    ref_words, owner = [], []
+    for i, lemma in enumerate(reference):
+        for w in str(lemma).split():
+            ref_words.append(w.lower())
+            owner.append(i)
+
+    matcher = difflib.SequenceMatcher(
+        None, ref_words, [w.lower() for w in words], autojunk=False)
+    out = [None] * len(tokens)
+    for block in matcher.get_matching_blocks():
+        for k in range(block.size):
+            tok_i = owner[block.a + k]
+            word = words[block.b + k]
+            out[tok_i] = (out[tok_i] + " " + word) if out[tok_i] else word
+    return out
+
+
 def run_model(model, tok, text):
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text}]
@@ -163,11 +204,28 @@ if st.button("Lemmatise", type="primary") and text.strip():
     rl = run_rules(tokens, lex, roots)
     tags = rule_tags(tokens, lex, roots)
 
+    # Run the model before drawing the table so its answer can be a column
+    # rather than a footnote - the comparison is the point of the page.
+    ft_sentence, ft_words, ft_error = None, None, None
+    if use_model and adapter:
+        try:
+            model, tok = load_model(adapter)
+            ft_sentence = run_model(model, tok, text)
+            ft_words = align_to_tokens(tokens, ft_sentence, rl)
+        except Exception as e:
+            ft_error = str(e)
+
     rows = []
     for i, t in enumerate(tokens):
-        rows.append({"token": t, "MALINDO": md[i], "rules": rl[i],
-                     "rule applied": tags[i],
-                     "dictionary missed it": "yes" if md[i] != rl[i] else ""})
+        row = {"token": t, "MALINDO": md[i], "rules": rl[i]}
+        if ft_words is not None:
+            row["fine-tune"] = ft_words[i] if ft_words[i] is not None else "-"
+        row["rule applied"] = tags[i]
+        row["only the model got it"] = (
+            "yes" if ft_words and ft_words[i] not in (None, md[i], rl[i])
+            and md[i] == rl[i] else "")
+        rows.append(row)
+
     st.subheader("Token by token")
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
@@ -175,17 +233,21 @@ if st.button("Lemmatise", type="primary") and text.strip():
     st.caption("The dictionary left %d of %d tokens unchanged that the rule "
                "pipeline normalised." % (missed, len(tokens)))
 
+    if ft_error:
+        st.error("Could not run the model: %s" % ft_error)
+        st.caption("The dictionary and rule columns are unaffected.")
+    elif ft_words is not None and any(w is None for w in ft_words):
+        st.warning(
+            "The model returned %d words for %d tokens, so some rows could "
+            "not be aligned. Its full answer is below."
+            % (len(ft_sentence.split()), len(tokens)))
+
     a, b = st.columns(2)
     a.markdown("**MALINDO only**")
     a.info(" ".join(md))
     b.markdown("**Rules**")
     b.success(" ".join(rl))
 
-    if use_model and adapter:
-        try:
-            model, tok = load_model(adapter)
-            st.markdown("**Fine-tuned model** (`%s`)" % adapter)
-            st.success(run_model(model, tok, text))
-        except Exception as e:
-            st.error("Could not run the model: %s" % e)
-            st.caption("The dictionary and rule columns above are unaffected.")
+    if ft_sentence is not None:
+        st.markdown("**Fine-tuned model** (`%s`)" % adapter)
+        st.success(ft_sentence)
