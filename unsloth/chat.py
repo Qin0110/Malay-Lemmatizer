@@ -14,7 +14,7 @@ Try the Malay rojak lemmatiser on your own sentences.
 There is more than one adapter in this repo and they are NOT interchangeable -
 each was trained with its own system prompt and target format. Which prompt an
 adapter needs is recorded in skill.ADAPTERS and asked for by name, so you no
-longer have to remember. Defaults to lemmatizer_lora; pass --adapter.
+longer have to remember. Defaults to lemmatizer_lora_yt.
 
 WHAT YOU GET BACK
 -----------------
@@ -52,8 +52,10 @@ import argparse
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template
 
-# Must match training config in llm.py
-ADAPTER_DIR = "lemmatizer_lora"
+# Must match training config in llm.py. lemmatizer_lora and
+# lemmatizer_lora_yt8k were removed from this repo, so the only adapter left
+# is the one this pipeline is about.
+ADAPTER_DIR = "lemmatizer_lora_yt"
 CHAT_TEMPLATE = "llama-3.2"
 
 # Per skill version, because v2 is a bigger job in both directions: its targets

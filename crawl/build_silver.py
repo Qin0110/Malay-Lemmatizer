@@ -42,11 +42,24 @@ GOLD_POOL = ROOT / "data" / "gold_pool.jsonl"
 SILVER = ROOT / "data" / "silver.jsonl"
 # These must match what unsloth/llm.py reads in its v1 branch, or a rebuild
 # here silently leaves training on the previous dataset. It read train_sft
-# originally and was later repointed at training.jsonl.
-TRAIN_OUT = ROOT / "unsloth" / "data" / "training.jsonl"
-VAL_OUT = ROOT / "unsloth" / "data" / "val_sft.jsonl"
+# originally, was later repointed at training.jsonl, and now writes the
+# three-way-split files below.
+#
+# NEW NAMES ON PURPOSE. The old training.jsonl / val_sft.jsonl are left on
+# disk untouched: they are the provenance of the already-trained
+# lemmatizer_lora_yt adapter, and training.jsonl's targets were rewritten
+# after the fact by a script that no longer exists (manual_rework_data.py,
+# recoverable with `git show 48b6697:manual_rework_data.py`). Overwriting them
+# would destroy the record of how that adapter was built.
+TRAIN_OUT = ROOT / "unsloth" / "data" / "training_split.jsonl"
+DEV_OUT = ROOT / "unsloth" / "data" / "dev_split.jsonl"
+MANIFEST = ROOT / "data" / "split_manifest.json"
+DEV_ANNOTATED = ROOT / "data" / "dev_annotated.jsonl"
 
-VAL_RATIO = 0.12
+# A fixed experimental design choice, not a tuned value. The dev set exists to
+# monitor training and pick a checkpoint; the test set is data/gold.jsonl and
+# is never touched during development.
+DEV_RATIO = 0.10
 SEED = 3407
 
 # Must stay byte-identical to unsloth/llm.py, which is why it is imported
@@ -134,26 +147,119 @@ def main(n_target, dry_run):
             "band": row["band"],
         })
 
-    n_val = max(1, int(len(rows) * VAL_RATIO))
-    val, train = rows[:n_val], rows[n_val:]
+    train, dev = stratified_split(rows)
 
-    _report(rows, train, val, src_counts, by_band, picked)
+    _report(rows, train, dev, src_counts, by_band, picked)
 
     if dry_run:
         print("\n--dry-run: nothing written.")
         return
 
-    TRAIN_OUT.parent.mkdir(parents=True, exist_ok=True)
-    _dump_chatml(TRAIN_OUT, train)
-    _dump_chatml(VAL_OUT, val)
     with SILVER.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print("\nwrote %d -> data/silver.jsonl" % len(rows))
+    write_splits(train, dev)
 
-    print("\nwrote %d -> unsloth/data/train_sft.jsonl" % len(train))
-    print("wrote %d -> unsloth/data/val_sft.jsonl" % len(val))
-    print("wrote %d -> data/silver.jsonl" % len(rows))
-    print("\nNext: cd unsloth && python llm.py --train")
+
+def stratified_split(rows, seed=SEED):
+    """(train, dev), stratified by difficulty band.
+
+    The old split was `dev, train = rows[:n], rows[n:]` on an already-shuffled
+    list, which is random but leaves the band mix of the dev set to luck. Held
+    out by band instead, so dev has the same low/mid/high proportions as train
+    and a dev loss is comparable across runs.
+    """
+    rng = random.Random(seed)
+    by_band = defaultdict(list)
+    for r in rows:
+        by_band[r["band"]].append(r)
+
+    n_dev_total = max(1, round(len(rows) * DEV_RATIO))
+    dev = []
+    for band in sorted(by_band):
+        pool = sorted(by_band[band], key=lambda r: r["id"])   # deterministic
+        share = round(n_dev_total * len(pool) / len(rows))
+        dev += rng.sample(pool, min(share, len(pool)))
+
+    # Rounding per band can land a row or two off the target; top up or trim
+    # from the largest band so the total is exactly the intended size.
+    dev_ids = {r["id"] for r in dev}
+    if len(dev) < n_dev_total:
+        rest = [r for r in sorted(rows, key=lambda r: r["id"])
+                if r["id"] not in dev_ids]
+        dev += rng.sample(rest, n_dev_total - len(dev))
+    elif len(dev) > n_dev_total:
+        dev = rng.sample(dev, n_dev_total)
+
+    dev_ids = {r["id"] for r in dev}
+    train = [r for r in rows if r["id"] not in dev_ids]
+    rng.shuffle(train)
+    rng.shuffle(dev)
+    return train, dev
+
+
+def write_splits(train, dev):
+    """Write the ChatML splits and the manifest, then assert the design."""
+    gold_ids = excluded_ids()
+    train_ids = {r["id"] for r in train}
+    dev_ids = {r["id"] for r in dev}
+
+    assert not (train_ids & dev_ids), "train and dev overlap"
+    assert not (train_ids & gold_ids), "gold leaked into train"
+    assert not (dev_ids & gold_ids), "gold leaked into dev"
+    assert len(train_ids) == len(train), "duplicate ids in train"
+    assert len(dev_ids) == len(dev), "duplicate ids in dev"
+
+    TRAIN_OUT.parent.mkdir(parents=True, exist_ok=True)
+    _dump_chatml(TRAIN_OUT, train)
+    _dump_chatml(DEV_OUT, dev)
+
+    # The same dev rows with their per-token annotation kept, which
+    # llm.py --eval and any error analysis need. ChatML alone carries only
+    # text, and scoring needs lemmas/band/src.
+    with DEV_ANNOTATED.open("w", encoding="utf-8") as f:
+        for r in dev:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    MANIFEST.write_text(json.dumps({
+        "seed": SEED,
+        "dev_ratio": DEV_RATIO,
+        "counts": {"train": len(train), "dev": len(dev),
+                   "gold_excluded": len(gold_ids)},
+        "band_mix": {
+            "train": dict(Counter(r["band"] for r in train)),
+            "dev": dict(Counter(r["band"] for r in dev)),
+        },
+        "train_ids": sorted(train_ids),
+        "dev_ids": sorted(dev_ids),
+    }, indent=1), encoding="utf-8")
+
+    print("wrote %d -> %s" % (len(train), TRAIN_OUT.relative_to(ROOT)))
+    print("wrote %d -> %s" % (len(dev), DEV_OUT.relative_to(ROOT)))
+    print("wrote %d -> %s" % (len(dev), DEV_ANNOTATED.relative_to(ROOT)))
+    print("wrote      -> %s" % MANIFEST.relative_to(ROOT))
+    print("\nband mix   train %s"
+          % sorted(Counter(r["band"] for r in train).items()))
+    print("           dev   %s"
+          % sorted(Counter(r["band"] for r in dev).items()))
+    print("\nchecks     train n dev = 0, train n gold = 0, dev n gold = 0  OK")
+    print("\nNext: cd unsloth && USE_REASONING=0 python llm.py --train")
+
+
+def resplit():
+    """Redo the split from the existing data/silver.jsonl, nothing else.
+
+    Kept separate from a full build because rebuilding silver.jsonl re-derives
+    every label, and the lexicons have moved since it was last generated.
+    """
+    if not SILVER.exists():
+        sys.exit("No data/silver.jsonl. Run without --resplit first.")
+    rows = [json.loads(l) for l in SILVER.open(encoding="utf-8") if l.strip()]
+    print("re-splitting %d silver sentences, seed %d, dev ratio %.2f\n"
+          % (len(rows), SEED, DEV_RATIO))
+    train, dev = stratified_split(rows)
+    write_splits(train, dev)
 
 
 def _dump_chatml(path, rows):
@@ -166,10 +272,10 @@ def _dump_chatml(path, rows):
             ]}, ensure_ascii=False) + "\n")
 
 
-def _report(rows, train, val, src_counts, by_band, picked):
+def _report(rows, train, dev, src_counts, by_band, picked):
     total = sum(src_counts.values())
-    print("\n%d sentences, %d tokens  (train %d / val %d)"
-          % (len(rows), total, len(train), len(val)))
+    print("\n%d sentences, %d tokens  (train %d / dev %d)"
+          % (len(rows), total, len(train), len(dev)))
 
     print("\n%-11s %7s %7s" % ("label src", "n", "share"))
     print("-" * 27)
@@ -199,5 +305,11 @@ if __name__ == "__main__":
     p.add_argument("--n", type=int, default=3000,
                    help="training sentences to generate (default 3000)")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--resplit", action="store_true",
+                   help="redo the 90/10 split from the existing "
+                        "data/silver.jsonl without rebuilding it")
     a = p.parse_args()
-    main(a.n, a.dry_run)
+    if a.resplit:
+        resplit()
+    else:
+        main(a.n, a.dry_run)

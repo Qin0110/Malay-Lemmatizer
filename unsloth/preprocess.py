@@ -91,8 +91,22 @@ def normalise_chars(text):
 REDUP_RE = re.compile(r"^([a-z]{2,})2([^a-z0-9]*)$")
 
 
-def expand_reduplication(text):
-    """budak2 -> budak-budak, makan2! -> makan-makan!"""
+def expand_reduplication(text, expand=False):
+    """budak2 -> budak-budak, when asked.
+
+    OFF by default, and that default is load-bearing. The adapter was trained
+    on raw corpus text: 419 training rows carry the digit form `budak2` and
+    only 22 carry the hyphenated one, so expanding here would hand the model
+    the rare spelling of a construction it knows well in the common one. Worse,
+    `budak-budak` is a single token to the tokeniser while the model answers
+    with two words, which used to fail alignment outright and drop the whole
+    rule table.
+
+    Kept available because Preprocess/normalizer.py expands, and someone
+    comparing the two pipelines needs to be able to match its behaviour.
+    """
+    if not expand:
+        return text
     out = []
     for word in text.split():
         m = REDUP_RE.match(word)
@@ -115,6 +129,9 @@ URL_RE = re.compile(r"https?://\S+|www\.\S+")
 HANDLE_RE = re.compile(r"[@#][\w_]+")
 DIGIT_RE = re.compile(r"\d")
 DIGIT_WORD_RE = re.compile(r"\S*\d\S*")
+
+# A word carrying the reduplication marker, with any trailing punctuation.
+REDUP_MARKER_RE = re.compile(r"^([a-z]{2,})2([^a-z0-9]*)$")
 
 # Keep letters, whitespace, apostrophe and hyphen. The hyphen has to survive:
 # stage 2 just used it to write the reduplication out in full.
@@ -149,14 +166,23 @@ def eliminate(text, number_policy="strip"):
     text = URL_RE.sub(" ", text)
     text = HANDLE_RE.sub(" ", text)
 
-    if number_policy == "drop":
-        text = DIGIT_WORD_RE.sub(" ", text)
-    elif number_policy == "strip":
-        text = DIGIT_RE.sub("", text)
-
-    keep = SYMBOL_KEEP_NUM_RE if number_policy == "keep" else SYMBOL_RE
-    text = keep.sub(" ", text)
-    return WS_RE.sub(" ", text).strip()
+    # The "2" in budak2 is a reduplication marker, not a number. Whichever
+    # policy applies to real digits, that one has to survive: strip it and the
+    # word silently becomes a different one, with no trace that anything was
+    # lost. Handled per token so the rest of the policy is untouched.
+    out = []
+    for tok in text.split():
+        m = REDUP_MARKER_RE.match(tok)
+        if m:
+            out.append(m.group(1) + "2")      # drop trailing punctuation only
+            continue
+        if number_policy == "drop":
+            tok = DIGIT_WORD_RE.sub(" ", tok)
+        elif number_policy == "strip":
+            tok = DIGIT_RE.sub("", tok)
+        keep = SYMBOL_KEEP_NUM_RE if number_policy == "keep" else SYMBOL_RE
+        out.append(keep.sub(" ", tok))
+    return WS_RE.sub(" ", " ".join(out)).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -181,16 +207,16 @@ STAGE_NAMES = ("input", "1 characters", "2 reduplication",
                "3 elimination", "4 tokens")
 
 
-def trace(text, number_policy="strip"):
+def trace(text, number_policy="strip", expand_redup=False):
     """Run every stage and return [(stage name, value), ...] for display."""
     chars = normalise_chars(text)
-    redup = expand_reduplication(chars)
+    redup = expand_reduplication(chars, expand_redup)
     clean = eliminate(redup, number_policy)
     tokens = tokenise(clean)
     return list(zip(STAGE_NAMES, [text, chars, redup, clean, tokens]))
 
 
-def preprocess(text, number_policy="strip", as_tokens=False):
+def preprocess(text, number_policy="strip", as_tokens=False, expand_redup=False):
     """Full pipeline. Returns a space-joined string unless as_tokens=True.
 
     The joined string is what chat.py sends to the model: the fine-tune reads
@@ -199,7 +225,7 @@ def preprocess(text, number_policy="strip", as_tokens=False):
     feed a rule-based lemmatiser that does want tokens.
     """
     tokens = tokenise(eliminate(
-        expand_reduplication(normalise_chars(text)), number_policy))
+        expand_reduplication(normalise_chars(text), expand_redup), number_policy))
     return tokens if as_tokens else " ".join(tokens)
 
 

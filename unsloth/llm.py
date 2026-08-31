@@ -12,6 +12,7 @@ Install:
     pip install unsloth
 """
 import os
+import time
 import argparse
 import json
 import random
@@ -38,6 +39,23 @@ CHAT_TEMPLATE = "llama-3.2"
 VAL_RATIO = 0.15
 SEED = 3407
 ON_WINDOWS = True                       # set False under WSL2/Linux
+
+# --- training budget --------------------------------------------------------
+# Three things grew 2.7x when the corpus went from 3,000 to 8,000 sentences:
+# the number of optimiser steps, the size of every evaluation, and the number
+# of checkpoint writes. Evaluation grew worst - 800 dev rows scored every 50
+# steps is 7.2x the forward passes the 300-row dev set cost - and none of it
+# changes the trained weights, it only picks the checkpoint.
+#
+# EPOCHS is 2, not 3, on evidence rather than impatience: both previous runs
+# chose their best checkpoint before the end of epoch 2 (step 700 of 1,014,
+# and step 650 of 1,012). The third epoch overfitted both times.
+EPOCHS = 2
+BUDGET_MINS = 120        # hard wall-clock cap; 0 disables it
+BATCH_SIZE = 8           # sequences average 79 tokens, so batch 2 left the
+ACCUM_STEPS = 1          # GPU waiting on kernel launches. 8x1 == 2x4.
+EVAL_ROWS = 200          # dev rows used *in the loop* to pick the checkpoint
+EVAL_EVERY = 100         # steps between evaluations (and checkpoint writes)
 
 # v2 trains on every corpus the registry links (sources.py) and teaches the
 # model to show its derivation (skill.py). v1 trained on seed500 alone and
@@ -71,9 +89,16 @@ else:
     # side instead of overwriting the previous one:
     #     $env:ADAPTER_DIR = "lemmatizer_lora_yt8k"
     ADAPTER_DIR = os.environ.get("ADAPTER_DIR", "lemmatizer_lora_yt")
-    TRAIN_FILE = "data/training.jsonl"   # NOT train_chatml.jsonl - build_500.py owns that
-    VAL_FILE = "data/val_sft.jsonl"
-    VAL_SEED_FILE = "data/val_seed.jsonl"
+    # The three-way design: crawl/build_silver.py --resplit owns these two,
+    # and data/gold.jsonl is the test set, which nothing here may read.
+    # The older training.jsonl / val_sft.jsonl are left in place as the record
+    # of how the first lemmatizer_lora_yt was built; they are not read now.
+    TRAIN_FILE = "data/training_split.jsonl"
+    VAL_FILE = "data/dev_split.jsonl"
+    # Was data/val_seed.jsonl, an orphan of the earlier seed500 run that has
+    # now been removed. --eval scores the DEV split instead: gold.jsonl is the
+    # test set and nothing in training may read it.
+    VAL_SEED_FILE = "../data/dev_annotated.jsonl"
     MAX_SEQ_LEN = 512
 
 
@@ -140,7 +165,77 @@ def prepare():
 # STAGE 2: TRAIN
 # ----------------------------------------------------------------------------
 
-def train():
+def _build(cls, **kw):
+    """Construct `cls` with only the keyword arguments it actually accepts.
+
+    This repo has moved across TRL and transformers versions, and the two
+    renamed things underneath it: `evaluation_strategy` became `eval_strategy`
+    in transformers 4.46, and SFTTrainer's `tokenizer` became
+    `processing_class` in TRL 0.12. Rather than pin a version, ask the class
+    what it takes. Anything dropped is printed, never silently discarded --
+    a silently ignored eval_strategy is exactly how you end up believing you
+    have validation when you do not.
+    """
+    import inspect
+    from dataclasses import fields, is_dataclass
+
+    if is_dataclass(cls):
+        accepted = {f.name for f in fields(cls)}
+    else:
+        accepted = set(inspect.signature(cls.__init__).parameters)
+
+    for new_name, old_name in (("eval_strategy", "evaluation_strategy"),
+                               ("processing_class", "tokenizer")):
+        if new_name in kw and new_name not in accepted and old_name in accepted:
+            kw[old_name] = kw.pop(new_name)
+        elif old_name in kw and old_name not in accepted and new_name in accepted:
+            kw[new_name] = kw.pop(old_name)
+
+    dropped = sorted(k for k in kw if k not in accepted)
+    if dropped:
+        print("[config] %s does not accept, so NOT applied: %s"
+              % (cls.__name__, ", ".join(dropped)))
+    return cls(**{k: v for k, v in kw.items() if k in accepted})
+
+
+class TimeBudget:
+    """Stop training once a wall-clock budget is spent.
+
+    Subclassed off transformers.TrainerCallback at call time rather than at
+    import time, so this module still imports on a machine with no GPU stack.
+
+    Stopping early is safe here because save_steps == eval_steps and
+    load_best_model_at_end is on: whatever the budget cuts short, the adapter
+    saved is still the best checkpoint the dev set saw, not the last one.
+    """
+
+    @staticmethod
+    def make(minutes):
+        from transformers import TrainerCallback
+
+        class _Cb(TrainerCallback):
+            def on_train_begin(self, args, state, control, **kw):
+                self.t0 = time.time()
+                self.warned = False
+
+            def on_step_end(self, args, state, control, **kw):
+                spent = (time.time() - self.t0) / 60.0
+                if not self.warned and spent > minutes * 0.8:
+                    self.warned = True
+                    print("\n[budget] %.0f of %d min spent at step %d/%d"
+                          % (spent, minutes, state.global_step, state.max_steps))
+                if spent >= minutes:
+                    print("\n[budget] %d min reached at step %d/%d - stopping. "
+                          "The best checkpoint so far is still what gets saved."
+                          % (minutes, state.global_step, state.max_steps))
+                    control.should_training_stop = True
+                return control
+
+        return _Cb()
+
+
+def train(epochs=EPOCHS, budget_mins=BUDGET_MINS, batch=BATCH_SIZE,
+          accum=ACCUM_STEPS, eval_rows=EVAL_ROWS, eval_every=EVAL_EVERY):
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=BASE_MODEL,
         max_seq_length=MAX_SEQ_LEN,
@@ -170,33 +265,83 @@ def train():
 
     train_ds = load_dataset("json", data_files=TRAIN_FILE, split="train").map(fmt, batched=True)
 
+    # The dev split, which until now was written and then never read: train()
+    # built only train_ds and passed no eval_dataset, so no validation loss
+    # was computed at any point and val_sft.jsonl was a held-out split on
+    # paper only. It is the signal that picks the checkpoint below.
+    eval_ds = None
+    if os.path.exists(VAL_FILE):
+        eval_ds = load_dataset("json", data_files=VAL_FILE,
+                               split="train").map(fmt, batched=True)
+        full_dev = len(eval_ds)
+        # Score a fixed subset in the loop. eval_loss is a mean over roughly
+        # 15,000 target tokens at 200 rows, which is stable enough to rank
+        # checkpoints; the full dev split is still what gets reported, via
+        # `python crawl/evaluate.py --dev`. This is the single biggest saving
+        # available and it cannot change the trained weights, because nothing
+        # backpropagates through an evaluation.
+        if eval_rows and full_dev > eval_rows:
+            eval_ds = eval_ds.shuffle(seed=SEED).select(range(eval_rows))
+            print("dev set: %d rows from %s, %d sampled for in-loop eval"
+                  % (full_dev, VAL_FILE, eval_rows))
+        else:
+            print("dev set: %d rows from %s" % (full_dev, VAL_FILE))
+    else:
+        print("NO DEV SET at %s - training without validation." % VAL_FILE)
+
     print("\n" + "=" * 70)
     print(train_ds[0]["text"])
     print("=" * 70 + "\n")
 
-    trainer = SFTTrainer(
+    # Evaluate and checkpoint on the same cadence, which
+    # load_best_model_at_end requires.
+    steps_per_epoch = -(-len(train_ds) // (batch * accum))
+    total_steps = steps_per_epoch * epochs
+    print("\nplan: %d rows / (%d x %d) = %d steps an epoch x %d epochs "
+          "= %d steps, %d evaluations, budget %s"
+          % (len(train_ds), batch, accum, steps_per_epoch, epochs, total_steps,
+             total_steps // eval_every,
+             ("%d min" % budget_mins) if budget_mins else "none"))
+
+    cfg = dict(
+        dataset_text_field="text",
+        max_seq_length=MAX_SEQ_LEN,
+        dataset_num_proc=1 if ON_WINDOWS else 2,
+        per_device_train_batch_size=batch,
+        gradient_accumulation_steps=accum,
+        warmup_steps=5,
+        num_train_epochs=epochs,
+        learning_rate=2e-4,
+        optim="adamw_8bit",
+        weight_decay=0.01,
+        lr_scheduler_type="linear",
+        fp16=not is_bfloat16_supported(),
+        bf16=is_bfloat16_supported(),
+        logging_steps=5,
+        seed=SEED,
+        output_dir="training_runs",
+        report_to="none",
+    )
+    if eval_ds is not None:
+        cfg.update(
+            per_device_eval_batch_size=batch,
+            eval_strategy="steps",
+            eval_steps=eval_every,
+            save_strategy="steps",
+            save_steps=eval_every,
+            save_total_limit=2,          # checkpoints are ~160 MB each
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+        )
+
+    trainer = _build(
+        SFTTrainer,
         model=model,
-        tokenizer=tokenizer,              # TRL >=0.12: rename to processing_class=
+        processing_class=tokenizer,      # falls back to tokenizer= on old TRL
         train_dataset=train_ds,
-        args=SFTConfig(
-            dataset_text_field="text",
-            max_seq_length=MAX_SEQ_LEN,
-            dataset_num_proc=1 if ON_WINDOWS else 2,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=4,
-            warmup_steps=5,
-            num_train_epochs=3,
-            learning_rate=2e-4,
-            optim="adamw_8bit",
-            weight_decay=0.01,
-            lr_scheduler_type="linear",
-            fp16=not is_bfloat16_supported(),
-            bf16=is_bfloat16_supported(),
-            logging_steps=5,
-            seed=SEED,
-            output_dir="training_runs",
-            report_to="none",
-        ),
+        eval_dataset=eval_ds,
+        args=_build(SFTConfig, **cfg),
     )
 
     trainer = train_on_responses_only(
@@ -205,8 +350,38 @@ def train():
         response_part="<|start_header_id|>assistant<|end_header_id|>\n\n",
     )
 
+    # After train_on_responses_only, not before: it is documented to return
+    # the trainer it was given, but attaching afterwards holds whether it
+    # returns the same object or a rebuilt one.
+    if budget_mins:
+        trainer.add_callback(TimeBudget.make(budget_mins))
+
     stats = trainer.train()
-    print(f"\nRuntime: {stats.metrics['train_runtime'] / 60:.1f} min")
+    mins = stats.metrics["train_runtime"] / 60
+    print("\nRuntime: %.1f min%s" % (
+        mins, ("  (budget %d min)" % budget_mins) if budget_mins else ""))
+    if trainer.state.global_step < trainer.state.max_steps:
+        print("Stopped at step %d of %d - the budget cut the run short. "
+              "Raise --budget-mins, or lower --epochs, if you want it to "
+              "finish the schedule."
+              % (trainer.state.global_step, trainer.state.max_steps))
+
+    # Which checkpoint the dev set chose, and the curve it chose it from.
+    hist = [h for h in trainer.state.log_history if "eval_loss" in h]
+    if hist:
+        best = min(hist, key=lambda h: h["eval_loss"])
+        print("\ndev evaluations: %d" % len(hist))
+        print("first  eval_loss %.4f at step %s"
+              % (hist[0]["eval_loss"], hist[0].get("step")))
+        print("last   eval_loss %.4f at step %s"
+              % (hist[-1]["eval_loss"], hist[-1].get("step")))
+        print("BEST   eval_loss %.4f at step %s  <- checkpoint kept"
+              % (best["eval_loss"], best.get("step")))
+        if best is hist[-1]:
+            print("(best is the last step: the model was still improving, "
+                  "so more epochs may help)")
+    else:
+        print("\nNo eval_loss recorded - check the [config] lines above.")
 
     model.save_pretrained(ADAPTER_DIR)
     tokenizer.save_pretrained(ADAPTER_DIR)
@@ -352,12 +527,22 @@ if __name__ == "__main__":
     p.add_argument("--prepare", action="store_true")
     p.add_argument("--train", action="store_true")
     p.add_argument("--eval", action="store_true")
+    p.add_argument("--epochs", type=int, default=EPOCHS)
+    p.add_argument("--budget-mins", type=int, default=BUDGET_MINS,
+                   help="stop training after this many minutes (0 = no cap)")
+    p.add_argument("--bs", type=int, default=BATCH_SIZE,
+                   help="per-device batch; halve it and double --accum on OOM")
+    p.add_argument("--accum", type=int, default=ACCUM_STEPS)
+    p.add_argument("--eval-rows", type=int, default=EVAL_ROWS,
+                   help="dev rows scored in the loop (0 = all of them)")
+    p.add_argument("--eval-every", type=int, default=EVAL_EVERY)
     a, _ = p.parse_known_args()          # tolerate Jupyter's -f kernel.json
 
     if a.prepare:
         prepare()
     elif a.train:
-        train()
+        train(epochs=a.epochs, budget_mins=a.budget_mins, batch=a.bs,
+              accum=a.accum, eval_rows=a.eval_rows, eval_every=a.eval_every)
     elif a.eval:
         evaluate()
     else:

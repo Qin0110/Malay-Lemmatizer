@@ -504,6 +504,12 @@ def _databuilder():
     return _DB or None
 
 
+def _is_reduplication(token):
+    """True for the x-x form preprocess writes for the digit-2 shorthand."""
+    head, sep, tail = token.lower().partition("-")
+    return bool(sep) and head == tail and head != ""
+
+
 def align_lemmas(tokens, words):
     """Split a lemma sentence back into one lemma per input token.
 
@@ -519,10 +525,20 @@ def align_lemmas(tokens, words):
 
     widths = [len(slang[t.lower()].split()) if t.lower() in slang else 1
               for t in tokens]
+
     if sum(widths) != len(words):
-        if len(tokens) != len(words):
+        # A hyphenated reduplication the model spelled with a space:
+        # preprocess turns "rama2" into the single token "rama-rama", and the
+        # answer comes back as two words. Let exactly those tokens claim a
+        # second word, and only when that makes the totals agree.
+        redup = [i for i, t in enumerate(tokens) if _is_reduplication(t)]
+        if redup and sum(widths) + len(redup) == len(words):
+            for i in redup:
+                widths[i] += 1
+        elif len(tokens) == len(words):
+            widths = [1] * len(tokens)
+        else:
             return None
-        widths = [1] * len(tokens)
 
     out, i = [], 0
     for w in widths:

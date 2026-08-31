@@ -102,6 +102,63 @@ def malindo_roots():
     return out
 
 
+BM_DICT_CSV = ROOT / "malindo_morph" / "BM_dict.csv"
+_BM = None
+_EN = None
+
+
+def english_dict():
+    """A Hunspell en_US dictionary, or None if pyenchant is unavailable.
+
+    Optional on purpose: without it the labeller behaves exactly as it did
+    before, marking code-switched words `oov` instead of `codeswitch`.
+    """
+    global _EN
+    if _EN is None:
+        try:
+            import enchant
+            _EN = enchant.Dict("en_US")
+        except Exception:
+            _EN = False
+    return _EN or None
+
+
+def looks_english(token):
+    """True for a token an English dictionary accepts.
+
+    Length and alphabetic guards because enchant accepts single letters and
+    bare digits, and because a two-letter Malay particle should never be
+    diverted here.
+    """
+    if len(token) < 3 or not token.isalpha():
+        return False
+    d = english_dict()
+    return bool(d and d.check(token))
+
+
+def bm_dict():
+    """rojak -> standard, from BM_dict.csv. First spelling of a key wins.
+
+    Missing file is not fatal: the labeller falls back to SLANG alone, which
+    is what it did before this was added.
+    """
+    global _BM
+    if _BM is None:
+        import csv
+        out = {}
+        try:
+            with BM_DICT_CSV.open(encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    key = (row.get("rojak") or "").strip().lower()
+                    val = (row.get("actual") or "").strip()
+                    if key and val:
+                        out.setdefault(key, val)
+        except OSError:
+            pass
+        _BM = out
+    return _BM
+
+
 VOWELS = set("aeiou")
 
 
@@ -155,6 +212,11 @@ def propose(token, lex, roots=None):
         return token, "particle"
     if token in SLANG:
         return SLANG[token], "slang"
+    bm = bm_dict()
+    if token in bm:
+        # Same operation as SLANG, so the same tag. SLANG is checked first,
+        # so it keeps the 16 keys where the two lexicons disagree.
+        return bm[token], "slang"
 
     m = REDUP_RE.match(token)
     if m:
@@ -172,6 +234,8 @@ def propose(token, lex, roots=None):
     if collapsed != token:
         if collapsed in SLANG:
             return SLANG[collapsed], "elong"
+        if collapsed in bm:
+            return bm[collapsed], "elong"
         root = roots.get(collapsed) if roots else None
         if root:
             return root, "elong"
@@ -193,6 +257,13 @@ def propose(token, lex, roots=None):
         if lemma == token and looks_nonstandard(token):
             return lemma, "dict_check"
         return lemma, "dict"
+
+    # Last, so that anything a Malay rule can explain has already been taken.
+    # MALINDO lists English borrowings ("the", "real", "margin"), so most
+    # common English is caught above as `dict`; what reaches here is the
+    # code-switching the Malay side genuinely has no account of.
+    if looks_english(token):
+        return token, "codeswitch"
 
     return token, "oov"
 

@@ -4,9 +4,9 @@ library_name: transformers
 model_name: training_runs
 tags:
 - generated_from_trainer
+- trl
 - sft
 - unsloth
-- trl
 licence: license
 ---
 
@@ -37,9 +37,9 @@ This model was trained with SFT.
 
 - TRL: 0.24.0
 - Transformers: 5.5.0
-- Pytorch: 2.11.0+cu126
+- Pytorch: 2.5.1+cu121
 - Datasets: 4.3.0
-- Tokenizers: 0.22.1
+- Tokenizers: 0.22.2
 
 ## Citations
 
