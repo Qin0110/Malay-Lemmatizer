@@ -1,0 +1,23 @@
+Malay Rojak Lemmatiser - validation results
+Generated 2026-09-05 00:32 from cached predictions (no GPU).
+Reproduce: python crawl/evaluate.py --val --reuse --models-only --simple \
+             --adapter lemmatizer_lora_llama --adapter lemmatizer_lora_qwen
+
+val (model selection): 150 sentences, 1868 tokens, 596 need changing (32%)
+
+--models-only: showing the 4 language models; the non-neural baselines are omitted.
+
+==============================================================================
+system       precision    recall        F1 exact-match      WER      CER fmt-fail
+------------------------------------------------------------------------------
+base-llama      100.0%      1.3%      2.6%        0.7%   0.6983   0.5372   40.0%
+base-qwen       100.0%      1.2%      2.3%        0.7%   1.0832   1.0063   74.0%
+llama-ft         93.9%     70.3%     80.4%       41.3%   0.1604   0.1098    0.0%
+qwen-ft          93.5%     69.8%     79.9%       40.7%   0.1620   0.1126    0.0%
+==============================================================================
+Precision / recall / F1 frame lemmatisation as the decision to
+CHANGE a token: FP is over-correction, a token that should have
+been left alone. Recall is accuracy on tokens that needed
+changing. Exact-match is whole sentences correct. WER and CER
+compare the produced lemma sentence with the reference.
+

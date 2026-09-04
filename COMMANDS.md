@@ -168,9 +168,19 @@ python crawl/evaluate.py --val --reuse \
 python crawl/evaluate.py --model --adapter lemmatizer_lora_llama --base
 ```
 
-Predictions cache to `data/model_predictions_*.json` as each model finishes, so
-a crash partway costs only the model in progress. `--reuse` rebuilds every
-table from those with no GPU, which is how to regenerate report figures.
+Predictions cache to `data/model_predictions_<split>_<model>.json` as each
+model finishes, so a crash partway costs only the model in progress. The split
+is part of the filename because it has to be: the same adapter scored on `--val`
+and on gold produces two different files, and when the name carried only the
+adapter they overwrote each other silently. `--reuse` rebuilds every table from
+those with no GPU, which is how to regenerate report figures.
+
+The default table is the six reported metrics — overall token accuracy,
+precision, recall, F1, WER and CER — one row per language model (the
+un-fine-tuned bases and the fine-tunes). `--baselines` adds the non-neural rows
+back (copy, MALINDO, dict-root, rules); `--full` adds the diagnostic tables
+(CHANGED / unchanged split, sentence-exact, per-band and per-source accuracy,
+the honest subset, McNemar).
 
 `--errors` prints every token where the rules and the fine-tune disagree, with
 the gold answer.
