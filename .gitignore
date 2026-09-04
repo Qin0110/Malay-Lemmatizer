@@ -43,6 +43,7 @@ data/model_predictions_*.json
 .env                # the YouTube API key lives here; never commit it
 .venv/
 venv/
+env*
 
 # ---------------------------------------------------------------------------
 # WHAT IS DELIBERATELY TRACKED
