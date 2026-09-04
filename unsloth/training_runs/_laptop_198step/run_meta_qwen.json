@@ -1,0 +1,10 @@
+{
+  "base": "unsloth/Qwen2.5-3B-Instruct-bnb-4bit",
+  "steps": 198,
+  "batch": 1,
+  "accum": 4,
+  "examples": 792,
+  "max_seq_len": 896,
+  "lora_rank": 16,
+  "best_eval_loss": 0.06841529905796051
+}
