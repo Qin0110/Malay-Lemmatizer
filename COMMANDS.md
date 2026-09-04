@@ -193,6 +193,21 @@ python main.py --no-model "aku nk tdr"         # preprocessing only, no GPU
 
 In the REPL: `/raw`, `/stages`, `/plain`, `/lang`, `/help`.
 
+### The web interface
+
+```bash
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`. Same pipeline as `main.py`, with the lemma
+sentence, the per-token derivation, the preprocessing stages and the raw model
+output all on one page. The sidebar switches between the four evaluated models,
+so a base model's format failures can be shown on demand.
+
+The model stays in GPU memory once loaded, so switching models in the sidebar
+loads a second one. On a 4 GB card, restart the app rather than flipping
+between them mid-session.
+
 ### Adding a word without retraining
 
 The model knows only what it saw in training. A word absent from the corpus is
