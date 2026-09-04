@@ -1,21 +1,3 @@
-#!/usr/bin/env python
-"""Try the rule system on your own sentences - the CPU counterpart to chat.py.
-
-    python crawl/try_rules.py "aq nk tdr"
-    python crawl/try_rules.py                 # interactive
-    echo "sy nk yg tu" | python crawl/try_rules.py --stdin
-
-chat.py exercises the fine-tuned model and needs a GPU. Until now there was no
-equivalent for the rule cascade: it could only be run through the full
-evaluation, or through the Streamlit page. Both are heavy ways to answer "what
-does propose() do with this word".
-
-Prints the tag that fired for every token, which is the part worth looking at.
-The tag names the branch of the cascade that produced the lemma, so a wrong
-answer points straight at the rule that produced it rather than leaving you to
-guess which of nine stages was responsible.
-"""
-
 import argparse
 import sys
 from pathlib import Path

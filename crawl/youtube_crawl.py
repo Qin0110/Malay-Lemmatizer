@@ -1,27 +1,3 @@
-#!/usr/bin/env python
-"""
-Crawl comments from Malaysian YouTube channels for the rojak lemmatiser corpus.
-
-    python crawl/youtube_crawl.py --list          # show configured channels
-    python crawl/youtube_crawl.py --probe         # sample channels, check rojak density
-    python crawl/youtube_crawl.py --videos 25     # the real run
-    python crawl/youtube_crawl.py --videos 25     # rerun = resume, skips done
-
-Needs a YouTube Data API v3 key in .env at the project root:
-
-    YOUTUBE_API_KEY=AIza...
-
-console.cloud.google.com -> enable "YouTube Data API v3" -> APIs & Services
--> Credentials -> Create API key. Free quota is 10,000 units/day; a full
-35k-comment run costs about 400.
-
-Author names are deliberately NOT stored, only public comment text and the
-video it came from. Keeps the dataset defensible under the privacy clause
-in the assignment brief.
-
-Output: data/raw/youtube_raw.jsonl   (one COMMENT per line, not one sentence)
-"""
-
 import argparse
 import json
 import os
@@ -39,33 +15,17 @@ STATE_FILE = RAW_DIR / "crawl_state.json"
 
 API = "https://www.googleapis.com/youtube/v3"
 DAILY_QUOTA = 10000
-MAX_PAGES_PER_VIDEO = 3          # 3 pages x 100 comments = 300 per video
-
-# Channels to crawl. @handles or raw UC... IDs both work.
-# Entertainment/gossip comment sections carry far more rojak than formal news.
-# Run --probe first and swap anything that comes back too clean.
+MAX_PAGES_PER_VIDEO = 3        
 SOURCES = [
-    # Podcasts - the volume. Long, argumentative comment sections.
-    "@safwannazripod",          # 833k - probed 129 comments, good rojak
-    "@thechiccodepodcast",      # 246k - probed 107, heaviest rojak of the set
-    "@legasipodcast",           # 54k  - probed 134
-    "@kitakitaajepodcast",      # 50k  - probed 47
-    "@PaduBeb",                 #       - probed 54
-
-    # Lower yield, English-leaning comments, but they contribute code-switching
-    # examples the podcasts do not. The Malay filter will thin these heavily.
-    "@KumaarFamily",            # probed 4
-    "@ichangrm",                # probed 12
-    "@DESTINASITV",             # untested - the missing comma hid it last run
-
-    # News - low volume (many uploads have comments off) but the comments
-    # that exist are dense rojak. Supplementary, not load-bearing.
-    "@astroawani",
-
-    # Add your own here once you have the handle. Get it free by opening the
-    # channel in a browser and reading the /@handle from the URL bar, or run
-    #     python crawl/youtube_crawl.py --find "channel name"
-    # (--find costs 101 quota units, the URL method costs nothing)
+    "@safwannazripod",          
+    "@thechiccodepodcast",     
+    "@legasipodcast",         
+    "@kitakitaajepodcast",      
+    "@PaduBeb",                
+    "@KumaarFamily",          
+    "@ichangrm",            
+    "@DESTINASITV",
+    "@astroawani"
 ]
 
 
@@ -286,11 +246,6 @@ def crawl(videos_per_channel, max_pages, probe):
 
 
 def _probe_channel(client, video_ids, max_pages, tries=6):
-    """Walk down recent videos until one has comments, then show samples.
-
-    News channels disable comments on a lot of uploads, so testing only the
-    newest video tells you nothing about the channel.
-    """
     skipped = Counter()
     for vid in video_ids[:tries]:
         rows, reason = video_comments(client, vid, max_pages=1)

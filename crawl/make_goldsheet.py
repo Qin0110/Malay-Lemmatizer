@@ -1,56 +1,3 @@
-#!/usr/bin/env python
-"""
-Build (and collect) the gold-standard labelling sheet.
-
-    python crawl/make_goldsheet.py              # build data/gold_sheet.xlsx
-    python crawl/make_goldsheet.py --collect    # sheet -> data/gold.jsonl
-
-WHY THIS EXISTS
-    Every accuracy number in the report is measured against this file. It is
-    the only part of the dataset with human-verified labels: the training set
-    is silver (rule-generated), so a model trained on it can only ever be as
-    good as the rules unless something independent says otherwise. This is
-    that independent thing.
-
-HOW IT WORKS
-    You do NOT type lemmas from scratch. Each token is pre-filled by the same
-    rules the pipeline uses, and you only correct what is wrong - roughly 3-4
-    tokens a sentence rather than 11. The `rule` column says where each guess
-    came from, so you know which to distrust:
-
-        particle   kept as-is on purpose (la, weh, kot)   - rarely wrong
-        slang      from the SLANG lexicon (dh -> sudah)   - rarely wrong
-        dict       MALINDO resolved it cleanly            - rarely wrong
-        affix      MALINDO root column (bermain -> main)  - check
-        deriv      derived noun kept whole                - CHECK
-                   (pengangkutan stays pengangkutan)
-        redup      digit reduplication (budak2 -> budak)  - check
-        elong      elongation collapsed (gilaaa -> gila)  - check
-        num        a bare number, left alone               - never wrong
-        ambiguous  MALINDO gave several lemmas, picked 1  - CHECK
-        dict_check MALINDO echoed an informal spelling    - CHECK
-        oov        nothing resolved it, left unchanged    - CHECK
-
-    Sort by `rule` and work through `oov` and `ambiguous` first. Those are
-    where the fine-tune has to beat the baseline, so they are where a wrong
-    label does the most damage.
-
-STEMMING IS NOT LEMMATISATION
-    MALINDO's root column reduces every affixed form to its root, which for
-    Malay's mostly-DERIVATIONAL affixation is stemming: it turns
-    "pengangkutan" (transportation) into "angkut" (to carry) and
-    "pengalaman" (experience) into "alam" (world). Those are different words
-    with their own dictionary entries, so their lemma is themselves.
-
-    The `deriv` rule draws the line. A nominalising affix builds a new lexeme
-    and is kept; a verbal affix (me-, ber-, di-, ter-, -kan, -i) marks voice
-    on the same lexeme and is stripped. See is_derived_noun().
-
-OUTPUT
-    data/gold.jsonl in the same shape as unsloth/seed500.jsonl, so it drops
-    straight into llm.py --eval as the held-out test set.
-"""
-
 import argparse
 import json
 import re
@@ -121,11 +68,6 @@ _EN = None
 
 
 def english_dict():
-    """A Hunspell en_US dictionary, or None if pyenchant is unavailable.
-
-    Optional on purpose: without it the labeller behaves exactly as it did
-    before, marking code-switched words `oov` instead of `codeswitch`.
-    """
     global _EN
     if _EN is None:
         try:
@@ -137,12 +79,6 @@ def english_dict():
 
 
 def looks_english(token):
-    """True for a token an English dictionary accepts.
-
-    Length and alphabetic guards because enchant accepts single letters and
-    bare digits, and because a two-letter Malay particle should never be
-    diverted here.
-    """
     if len(token) < 3 or not token.isalpha():
         return False
     d = english_dict()
@@ -150,11 +86,6 @@ def looks_english(token):
 
 
 def bm_dict():
-    """rojak -> standard, from BM_dict.csv. First spelling of a key wins.
-
-    Missing file is not fatal: the labeller falls back to SLANG alone, which
-    is what it did before this was added.
-    """
     global _BM
     if _BM is None:
         import csv
@@ -176,14 +107,6 @@ VOWELS = set("aeiou")
 
 
 def pick(lemmas, token):
-    """Choose one lemma from MALINDO's candidates.
-
-    Two wrinkles in the data: a single lemma cell can pack alternatives
-    separated by "@" ("bagi@membagi"), and the first candidate is often an
-    inflected form ("ikut" -> "mengikut"), which is the opposite of a lemma.
-    Prefer the surface form when it is itself a listed lemma, else the
-    shortest - the least affixed candidate is the best default.
-    """
     cands = []
     for lemma in lemmas:
         for part in str(lemma).split("@"):
@@ -198,19 +121,6 @@ def pick(lemmas, token):
 
 
 def suffix_of(token, root):
-    """Which suffix is attached, identified AGAINST THE ROOT.
-
-    Testing the string end alone is wrong in both directions, and both
-    failures are common:
-
-        berjalan     ends in "an" but the "an" belongs to the root (jalan),
-                     so this is a bare ber- prefix, not a nominalisation
-        kecantikan   ends in "kan" but the suffix is -an; the "k" is the last
-                     letter of the root (cantik)
-
-    Requiring the root to appear in the remainder settles both. Returns "" when
-    no suffix is attached.
-    """
     if token.endswith("kan") and root in token[:-3]:
         return "kan"
     if token.endswith("i") and root in token[:-1]:
@@ -221,14 +131,6 @@ def suffix_of(token, root):
 
 
 def is_derived_noun(token, root, lex):
-    """Is this a NEW lexeme (keep it) rather than a form of the root (strip it)?
-
-    Two things have to hold. The affix must be nominalising -- the -an
-    suffix, or a peN-/ke- prefix forming an agent or abstract noun -- and
-    MALINDO must list the token as its own headword. The second condition is
-    what stops a plausible-looking analysis from inventing a word: if the
-    dictionary has no entry for it, it is not a lemma.
-    """
     if suffix_of(token, root) in ("kan", "i"):
         return False                        # -kan / -i are verbal, always
     if not headword(token, lex):
@@ -239,7 +141,6 @@ def is_derived_noun(token, root, lex):
 
 
 def headword(token, lex):
-    """Does MALINDO list this token as its OWN lemma?"""
     if token not in lex:
         return False
     lemma, _ = pick(lex[token], token)
@@ -247,13 +148,6 @@ def headword(token, lex):
 
 
 def looks_nonstandard(token):
-    """Vowel-starved tokens are dropped-vowel rojak, not standard Malay.
-
-    MALINDO contains plenty of informal spellings mapped to themselves
-    ("skolah" -> "skolah", "frm" -> "frm"), so a clean dictionary hit is
-    not proof the lemma is right. This catches the identity mappings worth
-    a second look without flagging ordinary words like "guru" or "dulu".
-    """
     letters = [c for c in token if c.isalpha()]
     if len(letters) < 2:
         return True
@@ -261,13 +155,6 @@ def looks_nonstandard(token):
 
 
 def propose(token, lex, roots=None):
-    """Best guess at the lemma, plus which rule produced it.
-
-    Order matters. Particles come first because several of them (ke, kan,
-    pun) are also real words MALINDO would happily inflect. Orthographic
-    repair runs before dictionary lookup so "gilaaa" gets a chance to
-    resolve as "gila".
-    """
     if token.isdigit():
         return token, "num"
     if token in PARTICLES:
@@ -286,12 +173,6 @@ def propose(token, lex, roots=None):
         lemma, _ = pick(lex.get(base, []), base)
         return (lemma or base), "redup"
 
-    # Three or more repeats only. Collapsing TWO repeats was tried and
-    # reverted: MALINDO carries Malay-ised spellings of English loanwords,
-    # so "all"->"al", "hello"->"helo" and "support"->"suport" all looked
-    # like successful resolutions. There is no lexical test that separates
-    # Malay elongation from an ordinary English double letter, so tokens
-    # like "tolonglahh" are left for the annotator instead.
     collapsed = ELONG_RE.sub(r"\1", token)
     if collapsed != token:
         if collapsed in SLANG:
@@ -306,42 +187,18 @@ def propose(token, lex, roots=None):
 
     root = roots.get(token) if roots else None
     if root and root != token:
-        # MALINDO gives a ROOT here, not a lemma, and the two are different
-        # questions. Reducing every affixed form to its root is stemming:
-        # it turns "pengangkutan" (transportation) into "angkut" (to carry)
-        # and "pengalaman" (experience) into "alam" (world), which are not
-        # the same words. Malay affixation is mostly DERIVATIONAL -- it
-        # builds new lexemes with their own dictionary entries -- so the
-        # lemma of a derived noun is the derived noun.
-        #
-        # The line drawn here:
-        #   nominalising affixes  -> a new lexeme  -> KEEP  (pengangkutan)
-        #   verbal affixes        -> the same lexeme -> STRIP (memakan -> makan)
-        #
-        # Malay has almost no inflection, so "verbal affix" here means the
-        # voice/transitivity markers (me-, ber-, di-, ter-, -kan, -i), which
-        # every grammar treats as forms of one verb rather than separate
-        # words.
         if is_derived_noun(token, root, lex):
             return token, "deriv"
-        # Surfaced as `affix` so the annotator can still spot over-stripping
-        # (semoga -> moga), which the root column does produce.
         return root, "affix"
 
     if token in lex:
         lemma, n = pick(lex[token], token)
         if n > 1:
             return lemma, "ambiguous"
-        # A dictionary hit that changes nothing, on a vowel-starved token,
-        # is MALINDO echoing an informal spelling back at us.
         if lemma == token and looks_nonstandard(token):
             return lemma, "dict_check"
         return lemma, "dict"
 
-    # Last, so that anything a Malay rule can explain has already been taken.
-    # MALINDO lists English borrowings ("the", "real", "margin"), so most
-    # common English is caught above as `dict`; what reaches here is the
-    # code-switching the Malay side genuinely has no account of.
     if looks_english(token):
         return token, "codeswitch"
 
@@ -450,12 +307,6 @@ def build():
 
 
 def _prior_corrections():
-    """Corrections already made, keyed by (sent_id, token).
-
-    Rebuilding the sheet used to throw away hand-labelling. Carrying the
-    edits forward means a fix to the pre-annotation costs nothing, so there
-    is never a reason to keep working against a sheet known to be wrong.
-    """
     if not GOLD_SHEET.exists():
         return {}
     try:
@@ -473,18 +324,6 @@ def _prior_corrections():
 # ---------------------------------------------------------------------------
 
 def _text(v):
-    """A spreadsheet cell as the text it was written as.
-
-    Excel stores a cell that looks numeric AS a number, so openpyxl hands back
-    int 2 for the token "2" -- and every corpus token that is a bare number
-    (counts, years, prices) comes back that way. The old code called .lower()
-    on it and died. Worse than dying would have been not dying: json.dumps
-    would then have written `"t": 2` into the annotation, and every downstream
-    comparison against the string "2" would silently miss.
-
-    A float that is integral is rendered without the ".0", because Excel will
-    sometimes store 8 as 8.0 and "8.0" would not match the token in the pool.
-    """
     if v is None:
         return ""
     if isinstance(v, bool):          # bool is an int subclass; catch it first
@@ -557,14 +396,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--collect", action="store_true",
                    help="read the finished sheet back into the --out file")
-    # The same sheet machinery builds the VALIDATION set, which is a different
-    # pool going to a different destination. Passing paths rather than copying
-    # this file means the two sets are pre-filled by identical rules, which is
-    # what makes their scores comparable -- a second copy would drift.
-    #
-    # All three move together. Overriding --pool while leaving --sheet at its
-    # default would silently overwrite the gold sheet with validation rows, so
-    # the group is validated as a unit below.
     p.add_argument("--pool", metavar="JSONL",
                    help="sentence pool to label (default data/gold_pool.jsonl)")
     p.add_argument("--sheet", metavar="XLSX",
@@ -579,9 +410,6 @@ if __name__ == "__main__":
                 "only some of them would write one set's rows into another "
                 "set's files.")
     if a.pool:
-        # Resolved against ROOT, not the shell's cwd: build() and collect()
-        # report their paths with .relative_to(ROOT), which raises on a bare
-        # relative path handed in from somewhere else in the tree.
         def _at(p):
             p = Path(p)
             return p if p.is_absolute() else (ROOT / p).resolve()

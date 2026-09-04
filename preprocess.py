@@ -60,27 +60,6 @@ import sys
 import unicodedata
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# STAGE 1: CHARACTER NORMALISATION
-# ---------------------------------------------------------------------------
-#
-# Lowercase, then reduce excessive character repetition:
-#     gilaaa   -> gila
-#     sedappp  -> sedap
-#     GILAAA   -> gila
-#
-# Two rules, applied in this order, because they answer different questions:
-#
-#   (a) a run of 3+ identical letters anywhere is always emphasis. No Malay
-#       root triples a letter, so collapsing to one is safe.
-#   (b) a run of exactly 2 identical letters AT THE END of a word is usually
-#       emphasis too ("gilaa", "okk"), but the same doubling inside a word is
-#       often real ("maaf", "taat", "saat"). Anchoring rule (b) to the end of
-#       the word is what keeps "maaf" intact.
-#
-# Applied per letter-run rather than per whole string: run it over the whole
-# sentence and rule (b)'s end anchor would only ever match the final word.
-
 LETTER_RUN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 _TRAILING_DOUBLE_RE = re.compile(r"(.)\1+$")
 _LONG_RUN_RE = re.compile(r"(.)\1{2,}")
@@ -98,33 +77,17 @@ def normalise_chars(text):
     return LETTER_RUN_RE.sub(lambda m: collapse_elongation(m.group(0)),
                              text.lower())
 
-
-# ---------------------------------------------------------------------------
-# STAGE 2: CHARACTER ELIMINATION
-# ---------------------------------------------------------------------------
-#
-# Remove emoji, unsupported scripts, URLs, user handles and unwanted symbols,
-# then apply the selected number-handling policy.
-
-# Everything from U+2E80 (CJK radicals) upwards goes in one comparison: CJK,
-# Thai sits below it so is handled by the symbol pass, and the whole emoji /
-# pictograph / kaomoji range sits above. Cheaper and more readable than a
-# hand-maintained list of emoji blocks.
 NON_LATIN_FLOOR = 0x2E80
 
 URL_RE = re.compile(r"https?://\S+|www\.\S+")
 HANDLE_RE = re.compile(r"[@#][\w_]+")
 
-# The reduplication marker, with any trailing punctuation. See THE
-# REDUPLICATION TRAP in the module docstring.
+
 REDUP_MARKER_RE = re.compile(r"^([a-z]{2,})2([^a-z0-9]*)$")
 
 DIGIT_RE = re.compile(r"\d")
 DIGIT_TOKEN_RE = re.compile(r"\S*\d\S*")
 
-# What survives: letters, whitespace, apostrophe, hyphen. The apostrophe is
-# kept for "do'a" / "ma'af"; the hyphen is kept because stage 3 needs it to
-# recognise "budak-budak" as one token.
 SYMBOL_RE = re.compile(r"[^a-z\s'-]")
 SYMBOL_KEEP_DIGITS_RE = re.compile(r"[^a-z0-9\s'-]")
 WS_RE = re.compile(r"\s+")
@@ -175,20 +138,6 @@ def eliminate(text, number_policy="strip"):
     return WS_RE.sub(" ", " ".join(out)).strip()
 
 
-# ---------------------------------------------------------------------------
-# STAGE 3: TOKENISATION
-# ---------------------------------------------------------------------------
-#
-# Split on whitespace boundaries while keeping the internal punctuation that
-# carries meaning. A hyphen is PERMITTED between two alphanumeric runs, so
-# "budak-budak" stays one token, but a dangling "-" or a run of "---" does not
-# glue anything together and is dropped.
-#
-# One token here must mean one line in the model's answer, because the
-# evaluation aligns the model's output against this token list positionally.
-# A tokenisation change is therefore a scoring change; do not make one without
-# regenerating the annotations.
-
 TOKEN_RE = re.compile(r"[a-z0-9]+(?:['-][a-z0-9]+)*")
 
 
@@ -198,32 +147,6 @@ def tokenise(text):
     budak-budak tu gila -> ['budak-budak', 'tu', 'gila']
     """
     return TOKEN_RE.findall(text)
-
-
-# ---------------------------------------------------------------------------
-# THE PIPELINE
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# STAGE 4: SLANG EXPANSION
-# ---------------------------------------------------------------------------
-#
-# Rewrites known rojak abbreviations to their standard form from BM_dict.csv:
-#
-#     dh   -> sudah        kat  -> di
-#     nk   -> hendak       xleh -> tidak boleh
-#
-# Runs LAST, on the token list rather than the raw string. Two reasons: the
-# earlier stages have already lowercased and stripped punctuation, so a lookup
-# here sees the same key shape the dictionary stores; and an entry that expands
-# to several words ("apasal" -> "apa pasal", 10% of the file) has to become
-# several tokens rather than one token containing a space, or the token list
-# stops being a token list.
-#
-# That expansion changes the token count, which matters: the model answers with
-# one derivation line per token it is given, so it will now describe the
-# EXPANDED tokens. Downstream code that assumed the token list matches an
-# annotation built from the raw sentence no longer holds.
 
 _HERE = Path(__file__).resolve().parent
 SLANG_FILE = _HERE / "malindo_morph" / "BM_dict.csv"
@@ -250,17 +173,6 @@ def _read_csv(path):
 
 
 def slang_map():
-    """The expansion table: BM_dict.csv, overridden by data/user_lexicon.csv.
-
-    The shipped dictionary does not always agree with this project's own
-    annotation. It maps `nak` to `hendak` where all 38 occurrences in the gold
-    and validation sets say `mahu`, and `x` to `tak` where the labels say
-    `tidak`. Left alone, stage 4 would hand the model a form its training data
-    calls wrong, on some of the most frequent tokens in the corpus.
-
-    So the user file wins. It is the place to record this project's conventions
-    without editing a shipped resource that other parts of the pipeline read.
-    """
     global _SLANG
     if _SLANG is None:
         merged = _read_csv(SLANG_FILE)
@@ -270,7 +182,6 @@ def slang_map():
 
 
 def expand_slang(tokens):
-    """budak2 dh gila -> budak2 sudah gila, one token at a time."""
     lookup = slang_map()
     out = []
     for tok in tokens:
@@ -281,21 +192,11 @@ def expand_slang(tokens):
     return out
 
 
-# ---------------------------------------------------------------------------
-# THE PIPELINE
-# ---------------------------------------------------------------------------
-
 STAGE_NAMES = ("input", "1 normalisation", "2 elimination", "3 tokens",
                "4 slang")
 
 
 def trace(text, number_policy="strip", expand=True):
-    """Run every stage and return [(stage name, value), ...] for display.
-
-    This is what the demo prints and what the report screenshots. Having the
-    intermediate values available by name means the pipeline can be shown
-    working rather than asserted to work.
-    """
     normalised = normalise_chars(text)
     cleaned = eliminate(normalised, number_policy)
     tokens = tokenise(cleaned)
@@ -305,16 +206,6 @@ def trace(text, number_policy="strip", expand=True):
 
 
 def preprocess(text, number_policy="strip", as_tokens=False, expand=True):
-    """Full pipeline. Returns a space-joined string unless as_tokens=True.
-
-    The joined string is what gets sent to the model: it was fine-tuned on
-    sentences, not on token lists. Returning the list instead means the same
-    preprocessing can feed a rule-based lemmatiser, which does want tokens.
-    Both come from the same call so the two paths can never drift apart.
-
-    `expand=False` skips the slang stage, which is how to see what the model
-    does with raw rojak -- the form it was actually fine-tuned on.
-    """
     tokens = tokenise(eliminate(normalise_chars(text), number_policy))
     if expand:
         tokens = expand_slang(tokens)
@@ -346,9 +237,6 @@ def show(text, number_policy):
 
 
 def main():
-    # The demo inputs contain emoji by design, and the default Windows console
-    # codepage raises on them mid-print. Only the CLI needs this -- importers
-    # get the functions without the side effect.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")

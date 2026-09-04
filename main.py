@@ -1,50 +1,3 @@
-#!/usr/bin/env python
-"""
-Chat with the Malay rojak lemmatiser.
-
-    python main.py                                  # interactive
-    python main.py "aku dh xleh handle keje tu"     # one sentence, then exit
-    python main.py --model llama-base               # which of the four models
-    python main.py --stages "Budak2 tu gilaaa!!"    # show the cleaning steps
-    python main.py --raw "Budak2 tu gilaaa!!"       # skip cleaning entirely
-    python main.py --plain "budak2 tu gila"         # lemma sentence only
-    python main.py --lang en "budak2 tu gila"       # English rule glosses
-
-THE ARCHITECTURE THIS FILE IS
------------------------------
-    user input
-       |
-       v  preprocess.py     normalise -> eliminate -> tokenise
-       v  skill.py          the system prompt, byte-identical to training
-       v  the selected LLM  one of the four in MODELS below
-       v  skill.py          parse the answer, render the derivation
-       v
-    final output
-
-Each stage lives in its own module and is runnable on its own. This file is
-only the wiring and the REPL -- if something here looks like linguistics, it
-is in the wrong file.
-
-WHAT YOU GET BACK
------------------
-The lemma sentence, then one line per token: the token, its lemma, and the
-rule the model says produced it. `python skill.py --rules` prints the nine
-rules; `python skill.py --card` prints the instructions the model is given,
-including the JANGAN list of things it must not do.
-
-The rule tags are the MODEL'S OWN CLAIM about what it did, not a re-derivation
-made here. That is the point of the reasoning format: when a lemma is wrong,
-the tag tells you which rule misfired.
-
-PREPROCESSING IS ON BY DEFAULT, AND THAT IS A CHOICE
-----------------------------------------------------
-Input is cleaned before it reaches the model. Whether that helps depends on
-whether the training targets were cleaned the same way -- if the model was
-fine-tuned on raw corpus text carrying capitals, commas and digits, then
-cleaning here shifts the input away from what it saw in training. Use --raw to
-send the sentence through untouched, and compare, before trusting either.
-"""
-
 import argparse
 import sys
 from pathlib import Path
@@ -53,26 +6,9 @@ import lexicon
 import skill
 from preprocess import NUMBER_POLICIES, preprocess, trace
 
-# ---------------------------------------------------------------------------
-# THE FOUR MODELS
-# ---------------------------------------------------------------------------
-#
-# Two base models and their two fine-tunes. The bases are matched on purpose:
-# both ~3B, both instruction-tuned, both in the same 4-bit Unsloth packaging,
-# so the only thing that differs between the families is the pretraining.
-#
-# Every one of them is served the SAME system prompt. A base model that cannot
-# hold the output format under the instructions the fine-tune was trained on
-# is a result worth reporting, not a handicap to correct for.
 
 ROOT = Path(__file__).resolve().parent
 
-# The two base models are Hugging Face ids. The two fine-tunes are LOCAL
-# folders, and are resolved to absolute paths rather than left as
-# "unsloth/lemmatizer_lora_llama" -- which reads as a Hugging Face repo under
-# the `unsloth` org, because that org really exists. A relative path here
-# would also break the moment main.py is run from anywhere but the project
-# root. Both failures look like a download error, not a path error.
 BASE_MODELS = {
     "llama-base": "unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
     "qwen-base":  "unsloth/Qwen2.5-3B-Instruct-bnb-4bit",
@@ -84,34 +20,21 @@ ADAPTERS = {
 MODELS = dict(BASE_MODELS, **ADAPTERS)
 DEFAULT_MODEL = "llama-ft"
 
-# Unsloth's chat-template name per family. Getting this wrong does not raise:
-# it silently wraps the prompt in the wrong special tokens, and the model
-# answers fluent nonsense -- the same class of failure as a stale system
-# prompt, and just as hard to spot.
+
 CHAT_TEMPLATES = (("qwen", "qwen-2.5"), ("llama", "llama-3.2"))
 DEFAULT_TEMPLATE = "llama-3.2"
 
-# The reasoning format is a long answer: ~15 lines of derivation plus the
-# sentence, against the ~30 tokens a bare lemma sentence needs. Sized so a
-# 30-token input cannot truncate its own derivation mid-table, which reads as
-# a model that cannot finish a thought.
 MAX_SEQ_LEN = 1024
 MAX_NEW_TOKENS = 512
 
 
 def resolve_model(name):
-    """A --model value -> (reference to load, display name).
-
-    Accepts a key from MODELS, a Hugging Face id, or a path to an adapter
-    folder, so a newly trained adapter can be tried without editing this file.
-    """
     if name in MODELS:
         return MODELS[name], name
     return name, name
 
 
 def template_for(ref):
-    """The chat template this model family needs."""
     low = str(ref).lower()
     for needle, template in CHAT_TEMPLATES:
         if needle in low:
@@ -127,13 +50,6 @@ def template_for(ref):
 # ---------------------------------------------------------------------------
 
 def load_model(ref):
-    """Load a model, its tokenizer, and the system prompt it expects.
-
-    unsloth and torch are imported HERE rather than at module scope so that
-    --help, --stages and every preprocessing path stay runnable on a machine
-    with no GPU. Importing unsloth costs several seconds and a CUDA probe;
-    nothing above this line needs either.
-    """
     try:
         from unsloth import FastLanguageModel
         from unsloth.chat_templates import get_chat_template
@@ -142,11 +58,6 @@ def load_model(ref):
                  "The preprocessing stages still work without it:\n"
                  "    python preprocess.py --demo\n"
                  "    python main.py --no-model \"Budak2 tu gilaaa!!\"")
-
-    # A base model was never fine-tuned, so it carries no skill stamp to read.
-    # Everything else is asked, never assumed -- a model served a prompt it was
-    # not trained on still answers fluently, just in the wrong format, and the
-    # score drops for a reason that has nothing to do with the weights.
     if str(ref) in BASE_MODELS.values():
         system_prompt = skill.SYSTEM_PROMPT
         version = skill.SKILL_VERSION + " (base, untrained)"
@@ -163,10 +74,6 @@ def load_model(ref):
     tokenizer = get_chat_template(tokenizer, chat_template=template_for(ref))
     FastLanguageModel.for_inference(model)
 
-    # These models ship generation_config.max_length = 131072 and we pass
-    # max_new_tokens instead. transformers warns about the pair on every
-    # generate() call, which puts a paragraph of noise above each answer.
-    # max_new_tokens already wins; clearing the unused one only quiets it.
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.max_length = None
 
@@ -175,13 +82,6 @@ def load_model(ref):
 
 
 def lemmatise(model, tokenizer, text, system_prompt):
-    """One sentence -> the model's raw answer.
-
-    Greedy decoding, not sampling. Lemmatisation has one right answer per
-    token, so there is nothing for temperature to buy -- and a reported score
-    that changes between runs of the same model on the same data cannot be
-    checked by anyone.
-    """
     msgs = [{"role": "system", "content": system_prompt},
             {"role": "user", "content": text}]
 
@@ -199,10 +99,6 @@ def lemmatise(model, tokenizer, text, system_prompt):
                             skip_special_tokens=True)
 
 
-# ---------------------------------------------------------------------------
-# INPUT AND OUTPUT
-# ---------------------------------------------------------------------------
-
 def prepare(text, clean=True, numbers="strip", stages=False):
     """Run the preprocessing, optionally showing its working."""
     if not clean:
@@ -218,20 +114,7 @@ def prepare(text, clean=True, numbers="strip", stages=False):
 
 
 def render(sent, response, lang="ms", plain=False, use_lexicon=True):
-    """Print the answer.
-
-    An answer that will not parse is printed RAW rather than swallowed. An
-    unreadable answer is a result too: it is how you find out that a base
-    model cannot hold the format, which is one of the things the four-way
-    comparison exists to measure.
-    """
     parsed = skill.parse_response(response)
-
-    # Applied AFTER parsing, so the model still sees and answers the raw rojak
-    # it was trained on; only its answer is corrected. Every correction is
-    # attributed below rather than folded into the model's own output -- the
-    # derivation format exists so a reader can tell which component produced
-    # each lemma, and a silent override would destroy that.
     n_fixed = lexicon.apply(parsed) if use_lexicon else 0
 
     if plain:
@@ -259,10 +142,6 @@ def render(sent, response, lang="ms", plain=False, use_lexicon=True):
     return parsed
 
 
-# ---------------------------------------------------------------------------
-# THE REPL
-# ---------------------------------------------------------------------------
-
 BANNER = """\
 Malay rojak lemmatiser. Type a sentence, or:
   /raw      toggle preprocessing on/off      /stages   toggle the cleaning trace
@@ -270,10 +149,6 @@ Malay rojak lemmatiser. Type a sentence, or:
   /help     show this again                  quit      exit (or exit, q, Ctrl-C)
 """
 
-# Accepted bare, without a leading slash, because that is what anyone who has
-# used a REPL types first. The cost is that the English words "exit" and "quit"
-# can no longer be lemmatised on their own -- type them inside a longer
-# sentence, or as "/exit", if you ever need to.
 QUIT_WORDS = {"quit", "exit", "q", "/quit", "/exit", "/q"}
 
 
@@ -315,10 +190,6 @@ def repl(model, tokenizer, system_prompt, clean, numbers, stages, plain,
             print("unknown command %r - /help for the list\n" % text)
             continue
 
-        # Per turn, not per session. A CUDA OOM on one long sentence, or a
-        # decode error on one odd input, should cost you that answer and not
-        # the loaded model -- reloading 3B weights to recover from a typo is a
-        # bad trade, and the session state (toggles, history) goes with it.
         try:
             sent = prepare(text, clean, numbers, stages)
             if not sent:
@@ -334,13 +205,8 @@ def repl(model, tokenizer, system_prompt, clean, numbers, stages, plain,
             print("  error: %s: %s\n" % (type(exc).__name__, exc))
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main():
-    # Rojak input carries emoji, and the default Windows console codepage
-    # raises on them mid-print rather than at the boundary.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -371,9 +237,6 @@ def main():
     a = p.parse_args()
     clean = not a.raw
 
-    # Inspecting the preprocessing is a legitimate thing to do on a machine
-    # with no GPU, so it must not pay for a model load. Returns before unsloth
-    # is ever imported.
     if a.no_model:
         if not a.sentence:
             sys.exit("--no-model needs a sentence to preprocess.")

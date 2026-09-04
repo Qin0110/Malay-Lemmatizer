@@ -1,37 +1,3 @@
-#!/usr/bin/env python
-"""
-Re-run the pre-fill rules over an already-labelled split, after a rule change.
-
-    python crawl/repropose.py --dry-run              # what would change
-    python crawl/repropose.py                        # apply, with a backup
-    python crawl/repropose.py --file data/val.jsonl
-
-WHY THIS EXISTS
----------------
-When propose() changes, every split labelled before the change is left
-describing the old policy. Re-labelling by hand would cost hours and would
-mostly reproduce answers the rules can now generate correctly, so the rules
-are re-run instead -- but only over tokens no person ever touched.
-
-THE RULE THIS FILE EXISTS TO ENFORCE
-------------------------------------
-    src == "human" is never overwritten.
-
-An annotator who corrected a token knew something the rules do not. A rule
-change is not a reason to discard that; if the new policy disagrees with a
-human label, the human label wins and the disagreement is REPORTED so a person
-can settle it. Silently overwriting hand-labelling would mean the gold set
-slowly becomes a record of the rules rather than an independent check on them,
-which is the one thing it cannot be allowed to become.
-
-WHAT CHANGES ARE SAFE
----------------------
-This rewrites `l` (the lemma) and `src` (the rule) for machine-labelled
-tokens, and rebuilds `lemma_text` to match. It never adds, removes or reorders
-tokens, so the alignment every metric depends on is untouched. That invariant
-is asserted before anything is written.
-"""
-
 import argparse
 import json
 import shutil

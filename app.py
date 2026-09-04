@@ -55,56 +55,16 @@ import main as cli                                              # noqa: E402
 import skill                                                    # noqa: E402
 from preprocess import NUMBER_POLICIES, trace                   # noqa: E402
 
-# The one system this page serves. `llama-ft` is the model the selection
-# protocol chose on the validation set: statistically tied with the fine-tuned
-# Qwen, and taken on the pre-declared tie-break of format-failure rate then
-# character error rate.
-#
-# Changing this string is all it takes to demonstrate a different system --
-# any key of main.MODELS works -- but the page shows one at a time, because a
-# 3B model in 4-bit needs about 2.2 GB and the card has 4 GB.
 SELECTED = "llama-ft"
 BLURB = "Fine-tuned Llama 3.2 3B + LoRA - selected on the validation set"
 
 
-# ---------------------------------------------------------------------------
-# ONE THREAD OWNS THE GPU
-# ---------------------------------------------------------------------------
-#
-# Streamlit runs every rerun of this script on a NEW thread and lets that
-# thread die when the run ends. Touching CUDA from a thread that then exits
-# corrupts the process heap: the rerun immediately after a generation dies with
-# Windows exception 0xC0000374 (STATUS_HEAP_CORRUPTION) and no Python
-# traceback. The browser reports that as a connection error, so the app looks
-# like it disconnected when really the server process is gone -- which is why
-# the answer appears and the page drops a moment later.
-#
-# Measured on this machine with no Streamlit involved at all, so this is a
-# CUDA/thread-lifetime problem that Streamlit's execution model merely trips:
-#
-#     generate on a thread, join it, start any further thread   -> 0xC0000374
-#     generate on ONE worker thread that never exits            -> survives
-#
-# So every CUDA call -- loading, generating, unloading, even reading free VRAM
-# for the sidebar -- is submitted to a single worker thread that lives as long
-# as the process. Script threads come and go without ever touching the driver.
-# The pool is deliberately never shut down.
-
-
 @st.cache_resource(show_spinner=False)
 def gpu_pool():
-    """The one thread allowed to talk to CUDA. Cached, so created once."""
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="lemmatiser-gpu")
 
 
 def on_gpu(fn, *args, **kwargs):
-    """Run fn on the GPU thread and wait for the answer.
-
-    Call this from the script thread, and never call st.* inside fn: widgets
-    need the script thread's context, which the worker does not have. Wrap the
-    call in st.spinner instead -- the spinner is entered here, the work happens
-    over there.
-    """
     return gpu_pool().submit(fn, *args, **kwargs).result()
 
 
@@ -117,13 +77,6 @@ def _free_gb():
 
 
 def gpu_free_gb():
-    """Free VRAM in GB, or None if there is no GPU to ask.
-
-    Reading it is a CUDA call, so it goes through the worker like everything
-    else. The figure is what the DRIVER has left: PyTorch's caching allocator
-    keeps whatever it has taken, so after a generation this reads near zero
-    even though the model itself needs only about 2.2 GB.
-    """
     try:
         return on_gpu(_free_gb)
     except Exception:                                           # noqa: BLE001
@@ -131,11 +84,6 @@ def gpu_free_gb():
 
 
 def model_error(exc, name):
-    """Explain a load or generate failure in terms of this card.
-
-    Shared by the start-up load and the generate call so that the same fault
-    is not described two different ways depending on when it happened.
-    """
     msg = str(exc)
     if ("dispatched on the CPU" in msg or "out of memory" in msg.lower()
             or "OutOfMemory" in type(exc).__name__):
@@ -151,12 +99,6 @@ def model_error(exc, name):
 
 
 def show_status(slot):
-    """Fill the sidebar's reserved slot with what is actually loaded now.
-
-    Called after the load, not before it, because loading is what changes the
-    answer. Writing into an st.empty() replaces what was there rather than
-    appending, so the slot never shows two contradicting captions.
-    """
     held = st.session_state.get("model_choice")
     free = gpu_free_gb()
     with slot.container():
@@ -166,7 +108,6 @@ def show_status(slot):
 
 
 def _to_cpu(bundle):
-    """Move the weights off the card. Runs on the GPU thread."""
     try:
         bundle[0].cpu()
     except Exception:                                           # noqa: BLE001
@@ -176,7 +117,6 @@ def _to_cpu(bundle):
 
 
 def _sweep():
-    """Collect, then hand the freed blocks back to the driver."""
     import gc
 
     import torch
@@ -186,33 +126,6 @@ def _sweep():
 
 
 def unload():
-    """Drop the loaded model and give its VRAM back.
-
-    WHY THIS EXISTS AT ALL
-    ----------------------
-    A 3B model in 4-bit occupies roughly 2.2 GB, so a 4 GB card holds exactly
-    one, and the page holds it for as long as it is open. Unload is how the
-    card is handed back to something else -- a training run, or main.py -- and
-    also the recovery path when a second process has already taken the memory:
-    bitsandbytes reports that as "Some modules are dispatched on the CPU or the
-    disk", which reads like a configuration problem rather than the memory
-    exhaustion it is.
-
-    THE ORDER MATTERS, AND .cpu() IS NOT OPTIONAL
-    ---------------------------------------------
-    Dropping the reference and calling empty_cache() is NOT enough: unsloth
-    patches modules globally and keeps its own references to the loaded model,
-    so the weights stay resident and the next load fails. Measured on this
-    card, 4 GB total:
-
-        loaded                    1.03 GB free
-        del + gc + empty_cache    1.03 GB free   <- nothing released
-        .cpu() first, then those  3.39 GB free   <- released
-
-    Moving the weights to host memory releases the CUDA blocks whether or not
-    anything else still holds a Python reference, and empty_cache() then
-    returns them to the driver.
-    """
     bundle = st.session_state.pop("model_bundle", None)
     st.session_state.pop("model_choice", None)
     if bundle is None:
@@ -232,30 +145,6 @@ def unload():
 
 
 def load(choice):
-    """The requested model, loading it only if it is not already the one held.
-
-    Kept in session_state rather than @st.cache_resource so that it can be
-    EVICTED: Streamlit's cache has no eviction hook, so a cached model stays
-    resident on the GPU for the life of the process, and the Unload button
-    could not give the card back. The parameter stays even though the page
-    serves one model, so that pointing SELECTED at another key is the only
-    edit needed.
-
-    The loading itself is main.load_model, not a copy of it, so the GUI and the
-    CLI get the same weights, the same per-family chat template and the same
-    system prompt. A model served the wrong template does not raise -- it
-    answers fluently in the wrong format, which reads as a weak model rather
-    than a misconfigured one, so this is worth having in exactly one place.
-
-    It runs on the GPU thread for the reason given above the pool: a model
-    loaded from a thread that later exits takes the process down with it.
-
-    What is deliberately NOT done anywhere here is sys.modules.pop("unsloth").
-    Forcing a re-import re-runs unsloth's global patching, and the second model
-    load in a process then dies without a traceback -- the interpreter simply
-    stops. Importing once and reusing the cached module loads model after
-    model in one process without incident.
-    """
     if st.session_state.get("model_choice") == choice:
         return st.session_state["model_bundle"]
 
@@ -288,17 +177,10 @@ with st.sidebar:
         st.error("%s is not on disk. Run import_adapters.py to add it."
                  % SELECTED)
 
-    # Reserved now, written once the run knows what is actually loaded. The
-    # sidebar is drawn before the model is, so filling this in here would
-    # report the state the page started in rather than the state it ends in.
     status = st.empty()
 
     if st.session_state.get("model_choice") \
             and st.button("Unload model", use_container_width=True):
-        # The page loads the model on every run, so unloading alone would be
-        # undone by the very next run and the only visible effect would be a
-        # wasted forty seconds. Recording the dismissal suppresses that reload
-        # until the model is actually asked for again by pressing Lemmatise.
         unload()
         st.session_state["hold_off"] = SELECTED
         st.rerun()
@@ -317,11 +199,6 @@ with st.sidebar:
                                "output.")
     lang = st.radio("Rule glosses", ("ms", "en"), horizontal=True)
 
-# The model is loaded when the page opens, not on the first submit. The wait is
-# the same either way, but where it falls changes how it reads: forty seconds
-# after pressing Lemmatise looks like the app has hung, while forty seconds
-# during start-up looks like start-up. By the time the box can be typed into,
-# the model behind it is resident.
 ready = True
 held_off = st.session_state.get("hold_off") == SELECTED
 if not held_off:
@@ -336,10 +213,6 @@ if held_off:
     st.info("**%s** is unloaded and the GPU is free. Press **Lemmatise** to "
             "load it again." % SELECTED)
 
-# A form, not a bare text_area plus button. Streamlit commits a text_area only
-# when it loses focus, so typing and clicking in one motion sends the click
-# before the text and the first press appears to do nothing. Inside a form both
-# arrive together, and Ctrl+Enter submits.
 with st.form("lemmatise"):
     text = st.text_area("Sentence", height=90,
                         placeholder="aku dh xleh handle keje tu la weh")
@@ -359,9 +232,6 @@ if go:
         st.stop()
 
     try:
-        # Normally already resident, loaded above before the form was drawn.
-        # The exception is a model dismissed with Unload: asking for it again
-        # is what brings it back, so the hold is lifted here.
         st.session_state.pop("hold_off", None)
         model, tok, prompt = load(SELECTED)
         with st.spinner("Lemmatising..."):
@@ -378,8 +248,6 @@ if go:
     n_fixed = lexicon.apply(parsed) if use_lex else 0
 
     if not parsed["steps"]:
-        # An unreadable answer is a result, not an error to swallow: it is how
-        # a base model's inability to hold the format shows itself.
         st.error("The model did not produce a parseable derivation.")
         st.caption("Expected for an un-fine-tuned base model: on the gold test "
                    "set base Llama failed this on 39.3% of inputs.")

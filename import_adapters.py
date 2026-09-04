@@ -1,38 +1,3 @@
-#!/usr/bin/env python
-"""
-Import adapters trained elsewhere (Colab, a lab machine) into this project.
-
-    python import_adapters.py --from "D:/Drive/lemmatizer_adapters"
-    python import_adapters.py --from ... --dry-run
-    python import_adapters.py --from ... --keep-existing   # do not overwrite
-
-WHAT THIS IS FOR
-----------------
-Training somewhere with a bigger GPU and finishing here is the normal shape of
-this project: a 4 GB laptop card completes about 11% of an epoch in two hours,
-where a 16 GB T4 completes the whole thing. What comes back is two adapter
-folders and a tree of trainer_state.json files, and three things have to be
-true before they can be used or reported:
-
-  1. Both models must carry the SAME step count. Step count is training-data
-     volume, so unequal steps would mean the comparison measured which model
-     trained longer rather than which pretraining suits Malay. Asserted here
-     rather than discovered later in the results table.
-
-  2. Each adapter must carry its skill stamp, or inference will serve it a
-     prompt it was never trained on -- which fails silently, producing fluent
-     output in the wrong format.
-
-  3. `best_model_checkpoint` inside each trainer_state.json points at wherever
-     the training ran. After copying, that directory does not exist on this
-     machine, so the pointer is stale and is repointed at the copy. This is
-     housekeeping on a path field, not a claim about provenance: record the
-     hardware you actually trained on in the report.
-
-Nothing in this project reads that pointer, so leaving it stale breaks
-nothing. It is fixed so the files are self-consistent with where they live.
-"""
-
 import argparse
 import json
 import shutil
@@ -66,7 +31,6 @@ def repoint(state_path, new_dir):
     old = state.get("best_model_checkpoint")
     if not old:
         return None
-    # Keep the checkpoint's own folder name; only the parent path moved.
     state["best_model_checkpoint"] = str(new_dir / Path(old.replace("\\", "/")).name)
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return old, state["best_model_checkpoint"]
@@ -94,7 +58,6 @@ def main(src, dry_run, keep_existing):
     if not found:
         sys.exit("Nothing to import.")
 
-    # ---- the assertion the comparison rests on ---------------------------
     print("\nFAIRNESS")
     steps = {n: m.get("steps") for n, m in metas.items()}
     for name in found:
@@ -118,7 +81,6 @@ def main(src, dry_run, keep_existing):
     elif len(distinct) == 1:
         print("  matched at %d steps - comparable." % distinct.pop())
 
-    # ---- skill stamp ------------------------------------------------------
     print("\nSKILL STAMP")
     for name, path in found.items():
         stamp = path / "skill.json"
@@ -132,7 +94,6 @@ def main(src, dry_run, keep_existing):
         print("\n--dry-run: nothing copied.")
         return
 
-    # ---- copy -------------------------------------------------------------
     print("\nCOPYING")
     for name, path in found.items():
         dest = DEST_ADAPTERS / ("lemmatizer_lora_%s" % name)
@@ -147,7 +108,6 @@ def main(src, dry_run, keep_existing):
         shutil.copytree(path, dest)
         print("  %-6s -> %s" % (name, dest.relative_to(ROOT)))
 
-    # ---- trainer_state trees, for the loss curves -------------------------
     print("\nTRAINING RUNS (loss curves)")
     for name in found:
         run_name = "lemmatizer_lora_%s" % name

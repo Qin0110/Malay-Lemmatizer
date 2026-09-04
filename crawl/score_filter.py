@@ -1,29 +1,3 @@
-#!/usr/bin/env python
-"""
-Score the hand-checked rojak filter sample.
-
-    python crawl/score_filter.py
-
-Reads data/filter_check.tsv after you have filled the
-is_really_rojak_Y_or_N column with Y or N on every row, and reports the
-filter's precision and recall.
-
-Those two numbers go straight into the report. They turn "we filtered for
-rojak" into a measured claim, which is the difference between an assertion
-and a result.
-
-  precision  of the sentences the filter KEPT, how many are really rojak.
-             Low precision means the training corpus is contaminated with
-             standard Malay and English.
-
-  recall     of all the really-rojak sentences in the sample, how many the
-             filter kept. Low recall means you are throwing away good data
-             and biasing the corpus toward whatever the filter finds easy.
-
-Precision matters more than recall here: you have 13k sentences and need
-3k, so losing some is cheap, but contamination poisons the training set.
-"""
-
 import sys
 from collections import Counter
 from pathlib import Path

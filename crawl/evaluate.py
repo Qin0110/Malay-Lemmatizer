@@ -1,35 +1,3 @@
-#!/usr/bin/env python
-"""
-Score the lemmatisers against the hand-labelled gold set.
-
-    python crawl/evaluate.py                 # baselines only, no GPU needed
-    python crawl/evaluate.py --model         # + the fine-tuned adapter
-
-WHAT IS BEING COMPARED
-
-    copy         return every token unchanged. Not a real system - it is the
-                 floor. 67% of gold tokens are already their own lemma, so
-                 any result below this is worse than doing nothing.
-
-    malindo      MALINDO Morph alone, first lemma, no slang lexicon. This is
-                 the pipeline in main.py / streamlit.py - a plain dictionary
-                 lemmatiser, the honest "what you get for free" baseline.
-
-    rules        MALINDO root column + the SLANG lexicon + orthographic
-                 repair (elongation, reduplication). The strongest baseline
-                 buildable without machine learning, and the one the
-                 fine-tune has to beat to be worth anything.
-
-    finetune     the QLoRA adapter in unsloth/lemmatizer_lora_yt.
-
-WHY TWO NUMBERS PER SYSTEM
-
-    Overall accuracy is dominated by tokens that need no change at all. The
-    honest measure is accuracy on the CHANGED subset - tokens whose gold
-    lemma differs from the surface form. That is the work. A system can post
-    85% overall and still be useless if all of it comes from the free 67%.
-"""
-
 import argparse
 import difflib
 import json
@@ -41,8 +9,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "crawl"))
 sys.path.insert(0, str(ROOT / "unsloth"))
-# skill.py and preprocess.py live at the project root: they are the contract
-# between the data pipeline and the model, so neither half owns them.
 sys.path.insert(0, str(ROOT))
 
 from make_goldsheet import (malindo_lemmas, malindo_roots,   # noqa: E402
@@ -52,12 +18,6 @@ GOLD = ROOT / "data" / "gold.jsonl"
 SILVER = ROOT / "data" / "silver.jsonl"
 MANIFEST = ROOT / "data" / "split_manifest.json"
 VAL = ROOT / "data" / "val.jsonl"
-# The two un-fine-tuned baselines. Matched on purpose: both are ~3B
-# instruction-tuned decoders in the same 4-bit Unsloth packaging, so the only
-# thing that differs between the two families is the pretraining, not the size
-# or the quantisation. Qwen carries markedly more Malay in its pretraining mix
-# than Llama 3.2 does, which is what makes the comparison worth running rather
-# than a foregone conclusion.
 BASE_MODEL = "unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
 BASE_MODEL_ALT = "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
 BASE_MODELS = (BASE_MODEL, BASE_MODEL_ALT)
@@ -65,13 +25,6 @@ ADAPTER = ROOT / "unsloth" / "lemmatizer_lora_yt"   # overridden by --adapter
 
 
 def label_for(ref):
-    """A short row label for the results table.
-
-    The cache is named after the adapter folder, which is deliberately long and
-    unambiguous; a results table wants "llama-ft", not
-    "lemmatizer_lora_llama". Anything unrecognised keeps its folder name rather
-    than being forced into a scheme it does not fit.
-    """
     name = _tag(ref)
     for fam in ("llama", "qwen"):
         if name.startswith("lemmatizer_lora_") and fam in name:
@@ -80,39 +33,14 @@ def label_for(ref):
 
 
 def preds_path(adapter):
-    """One cache per adapter, named after it.
-
-    A single shared cache silently went stale once already: predictions
-    generated from one adapter were still being scored after a different
-    adapter replaced it on disk. Naming the cache after the adapter makes
-    that impossible - a different model simply has no cache yet.
-    """
     return ROOT / "data" / ("model_predictions_%s.json" % _tag(adapter))
 
 
 def _tag(ref):
-    """A filesystem-safe name for whatever we are about to run.
-
-    The base model is a Hugging Face id with a slash in it, and it must not
-    land in the same cache file as an adapter -- reusing one system's
-    predictions to score another is precisely the mistake the per-adapter
-    cache exists to prevent.
-    """
     name = getattr(ref, "name", None) or str(ref).rstrip("/").split("/")[-1]
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
-# The prompt alone is ~466 tokens at the median under the Llama tokeniser (the
-# v2 reasoning system prompt is long), and generation adds up to 200 more. At
-# the old value of 512 -- a leftover from v1, when the prompt was one line and
-# the answer a bare sentence -- the model ran out of window mid-derivation and
-# unsloth truncated it. Sized to the measured worst case with headroom.
-MAX_SEQ_LEN = 1024
 
-# Which chat template each family needs. This was a single hardcoded
-# "llama-3.2" applied to every model, which meant Qwen was wrapped in Llama's
-# special tokens. That does not raise: the model answers fluently in the wrong
-# format, so it simply scores badly and looks like a weak model rather than a
-# misconfigured one. Same failure mode the loss-mask markers have in train.py,
-# and the reason both are derived per family rather than assumed.
+MAX_SEQ_LEN = 1024
 CHAT_TEMPLATES = (("qwen", "qwen-2.5"), ("llama", "llama-3.2"))
 DEFAULT_TEMPLATE = "llama-3.2"
 
@@ -128,28 +56,11 @@ def template_for(ref):
           % (str(ref), DEFAULT_TEMPLATE))
     return DEFAULT_TEMPLATE
 
-# Ask the adapter which prompt it was trained with, exactly as chat.py does.
-#
-# This used to be `from llm import SYSTEM_PROMPT`, and that was a live bug.
-# llm.py selects v1 or v2 from the USE_REASONING environment variable, which
-# describes a TRAINING run rather than the model being scored -- so with that
-# variable unset (default "1") every evaluation of the v1 lemmatizer_lora_yt
-# was handing it the v2 reasoning prompt. The failure is silent: the model
-# still answers fluently, the answer is just the wrong format, and the score
-# comes out low for a reason that has nothing to do with the model.
-import skill                                                 # noqa: E402
+
+import skill                                               
 
 
 def prompt_for(ref):
-    """The system prompt this model expects.
-
-    This project has ONE skill version, so every system in the comparison --
-    both base models and both fine-tunes -- is served the identical prompt.
-    That is the point: the four-way comparison is about the weights, and
-    varying the prompt as well would confound it. A base model that cannot
-    hold the format under the same instructions the fine-tune was trained on
-    is a result, not a handicap to be corrected for.
-    """
     if str(ref) in BASE_MODELS:
         # Never fine-tuned, so it has no stamp to read and no opinion to ask.
         return skill.SYSTEM_PROMPT
@@ -180,13 +91,6 @@ def predict_malindo(row, lex, roots):
 
 
 def predict_malindo_root(row, lex, roots):
-    """MALINDO's root column - the dictionary's real morphological ability.
-
-    Fairer to MALINDO than predict_malindo: the lemma column mostly echoes
-    the surface form, so a lemma-column baseline makes the dictionary look
-    far weaker than it is. This one strips affixes properly but still has
-    no slang lexicon and no orthographic repair.
-    """
     out = []
     for e in row["lemmas"]:
         tok = e["t"]
@@ -231,18 +135,6 @@ def _import_unsloth():
 
 
 def _free_gpu(note=""):
-    """Give the weights back to the driver.
-
-    --base and --model load two 3B models in one process. Each is about
-    2.2 GB in 4-bit, and a 4 GB card holds exactly one, so the second
-    from_pretrained() fails with "Some modules are dispatched on the CPU or
-    the disk" - which reads like the model is too big, when really the
-    previous one is still resident.
-
-    Dropping the Python reference is not enough on its own: the CUDA caching
-    allocator keeps the block reserved, and unsloth's patching holds cycles
-    that only a collection breaks. Hence gc first, then empty_cache.
-    """
     import gc
     gc.collect()
     try:
@@ -258,16 +150,6 @@ def _free_gpu(note=""):
 
 
 def generate_raw(rows, adapter, system_prompt=None):
-    """Run one model and return its raw output text per sentence.
-
-    `adapter` is either a local adapter folder or the base-model id, and the
-    system prompt travels with it so a base-model run cannot silently borrow
-    the fine-tune's.
-
-    Kept separate from alignment and cached to disk: a GPU pass costs
-    minutes, and every change to the scoring logic would otherwise force
-    another one.
-    """
     FastLanguageModel, get_chat_template = _import_unsloth()
     if system_prompt is None:
         system_prompt = prompt_for(adapter)
@@ -278,12 +160,6 @@ def generate_raw(rows, adapter, system_prompt=None):
         dtype=None, load_in_4bit=True)
     tokenizer = get_chat_template(tokenizer, chat_template=template_for(adapter))
     FastLanguageModel.for_inference(model)
-
-    # Llama 3.2 ships generation_config.max_length = 131072, and we pass
-    # max_new_tokens instead. transformers 5.x warns about the pair on EVERY
-    # call, which buries the progress output under 150 identical paragraphs.
-    # Clearing the one we are not using silences it without changing behaviour
-    # - max_new_tokens already took precedence.
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.max_length = None
 
@@ -313,29 +189,6 @@ def generate_raw(rows, adapter, system_prompt=None):
 
 
 def align_all(rows, out_texts):
-    """Align generations to gold tokens; report the format-failure rate.
-
-    THE ANSWER IS A DERIVATION, NOT A SENTENCE
-    ------------------------------------------
-    This used to do `text.split()` and align those words positionally. That was
-    right for v1, whose whole answer was a bare lemma sentence with one word per
-    token. The v2 answer is a table:
-
-        <lema>
-        itulah | IMBUHAN? | itu
-        learn  | INGGERIS | learn
-        </lema>
-        <ayat>... </ayat>
-
-    Splitting that on whitespace yields three words per token plus the tags, so
-    the word count NEVER matches and every well-formed answer was reported as a
-    format failure -- 100% of them -- while the scores came from LCS salvage
-    over the tag soup. The model was fine; the metric was reading v2 output with
-    a v1 ruler.
-
-    So the block is parsed. A model that produced one derivation line per input
-    token has succeeded, whatever its word count.
-    """
     preds, strict_ok, unparseable = [], 0, 0
     for row, text in zip(rows, out_texts):
         parsed = skill.parse_response(text)
@@ -370,14 +223,6 @@ def align_all(rows, out_texts):
 
 
 def lemma_sentences(out_texts):
-    """The <ayat> sentence from each answer, for WER/CER.
-
-    Measuring the raw generation against the reference sentence charged the
-    reasoning models for every derivation line they were TRAINED to emit --
-    which is why a fine-tuned model scored WER 2.65 against its own base
-    model's 1.23. The sentence is the thing comparable to the reference; the
-    derivation is scored separately, per token.
-    """
     out = []
     for text in out_texts:
         parsed = skill.parse_response(text)
@@ -399,18 +244,6 @@ def align_strict(pred_words, lemmas):
 
 
 def align_lcs(pred_words, lemmas):
-    """Longest-common-subsequence alignment, for when the lengths disagree.
-
-    A generative model can drop or add a word anywhere in the sentence. With
-    strict positional alignment one spurious word shifts everything after it
-    and the whole sentence scores zero - which measures formatting, not
-    lemmatisation. Matching on the longest common subsequence instead lets
-    every token be judged on its own merits; only the genuinely unmatched
-    ones are counted wrong.
-
-    Returns a list the same length as `lemmas`: the matched prediction for
-    each token, or None where nothing aligned.
-    """
     gold_words, owner = [], []
     for i, e in enumerate(lemmas):
         for w in e["l"].split():
@@ -437,9 +270,6 @@ def align_lcs(pred_words, lemmas):
     return got
 
 
-# ---------------------------------------------------------------------------
-# SEQUENCE METRICS
-# ---------------------------------------------------------------------------
 
 def edit_distance(a, b):
     """Levenshtein distance between two sequences, O(len(a) x len(b))."""
@@ -457,15 +287,6 @@ def edit_distance(a, b):
 
 
 def sequence_metrics(rows, preds, raw_texts=None):
-    """Corpus-level WER and CER of the produced lemma sentence.
-
-    Corpus-level rather than the mean of per-sentence rates: a one-word
-    sentence would otherwise carry the same weight as a thirty-word one.
-
-    The hypothesis is the raw generation where there is one, so that words the
-    alignment absorbed still count as insertions or deletions. For the rule
-    baselines, which emit one lemma per token, it is those lemmas joined.
-    """
     w_err = w_len = c_err = c_len = 0
     for i, (row, pred) in enumerate(zip(rows, preds)):
         ref = " ".join(norm(w) for e in row["lemmas"]
@@ -486,12 +307,6 @@ def sequence_metrics(rows, preds, raw_texts=None):
 
 
 def mcnemar(a, b):
-    """Exact two-sided McNemar on paired binary outcomes.
-
-    The right test here: both systems are scored on the SAME tokens, so the
-    outcomes are paired and only the disagreements carry information.
-    Returns (b-only-correct, a-only-correct, p).
-    """
     from math import comb
     n01 = sum(1 for x, y in zip(a, b) if x == 0 and y == 1)
     n10 = sum(1 for x, y in zip(a, b) if x == 1 and y == 0)
@@ -499,11 +314,6 @@ def mcnemar(a, b):
     if n == 0:
         return n01, n10, 1.0
     k = min(n01, n10)
-    # Integer 2, not 2.0. base-llama disagrees with rules on ~1,500 of the
-    # 1,786 tokens, and comb(1500, 750) has ~450 digits: multiplying that sum
-    # by a float converts it to a float first and raises OverflowError. Kept
-    # exact until the final int/int division, which Python rounds correctly at
-    # arbitrary precision and underflows to 0.0 rather than raising.
     p = 2 * sum(comb(n, i) for i in range(k + 1)) / (2 ** n)
     return n01, n10, min(p, 1.0)
 
@@ -571,12 +381,6 @@ def prf(cm):
 
 
 def load_dev_rows():
-    """The 300 dev sentences, with their silver annotation attached.
-
-    dev_300.jsonl is ChatML and carries no per-token labels, so the ids are
-    read from the split manifest and the annotated rows pulled from
-    silver.jsonl. Scoring needs `lemmas`, `band` and `src`, not just text.
-    """
     if not MANIFEST.exists():
         sys.exit("No data/split_manifest.json. Run "
                  "`python crawl/build_silver.py --resplit` first.")
@@ -629,17 +433,6 @@ def run_neural(name, rows, ref, reuse, results, fmt_fail):
 
 
 def error_table(rows, results, a_name="rules", b_name=None):
-    """Every token the two systems disagree on, with the gold answer.
-
-    The aggregate gap between `rules` and `finetune` is 31 tokens out of
-    1,786 - small enough to print in full, which is the only way to know
-    whether it is a systematic weakness or a handful of accidents. Printing
-    all of them, not a chosen few, is the point: a report that quotes its
-    best three examples is not evidence.
-
-    Uses the same predictions the scores above were computed from, so this
-    cannot drift from the tables.
-    """
     if a_name not in results or b_name not in results:
         print("\nNeed both %s and %s scored - add --model (and --base).\n"
               % (a_name, b_name))
@@ -727,12 +520,6 @@ def main(with_model, reuse, adapters, with_base=False, on_dev=False,
         rows = load_dev_rows()
         label = "dev"
     elif on_val:
-        # The human-labelled VALIDATION split. This is where the choice
-        # between models is made, and it exists precisely because neither of
-        # the other two splits can make it: the dev split is silver, so the
-        # rules grade their own homework there, and gold is the test set --
-        # selecting on it and then reporting its score would mean the reported
-        # number no longer estimates anything.
         if not VAL.exists():
             sys.exit("No data/val.jsonl. Collect it first:\n"
                      "  python crawl/make_goldsheet.py --collect "
@@ -770,13 +557,6 @@ def main(with_model, reuse, adapters, with_base=False, on_dev=False,
         results[name]["preds"] = preds
         results[name]["wer"], results[name]["cer"] = sequence_metrics(rows, preds)
 
-    # --reuse means "score what has already been generated", so it should pick
-    # the base cache up too. Without this it silently produced a table with no
-    # before-fine-tuning row while the predictions sat on disk unread.
-    # The four-way comparison needs BOTH un-fine-tuned bases, not just Llama's.
-    # Each is generated once and cached by name, so a later run picks it up from
-    # disk with --reuse instead of paying for it again -- which matters when a
-    # 4 GB card holds exactly one 3B model at a time and each pass is an hour.
     for label, ref in (("base-llama", BASE_MODEL), ("base-qwen", BASE_MODEL_ALT)):
         cached = preds_path(ref).exists()
         wanted = (with_base and ref == BASE_MODEL) or \
@@ -788,17 +568,10 @@ def main(with_model, reuse, adapters, with_base=False, on_dev=False,
         print("no base-model cache yet - run once with --base / --base-qwen to "
               "add the before-fine-tuning rows.\n")
 
-    # Every adapter asked for, so both fine-tunes can share one table (and one
-    # McNemar comparison) instead of being read off two separate runs.
     for ad in adapters:
         if with_model or (reuse and preds_path(ad).exists()):
             run_neural(label_for(ad), rows, ad, reuse, results, fmt_fail)
 
-    # --models-only narrows every table below to the neural systems. The
-    # non-neural rows are still COMPUTED (they cost nothing and the honest-
-    # subset section needs `rules` to have a reference), they are just not
-    # printed -- so a run that reports four models can still be compared
-    # against a run that reports eight, from the same cached predictions.
     names = list(results)
     if models_only:
         keep = [n for n in names if n.startswith("base-") or n.endswith("-ft")]
@@ -917,14 +690,6 @@ def main(with_model, reuse, adapters, with_base=False, on_dev=False,
         print("the counts above are exactly those. p < 0.05 means the gap is")
         print("unlikely to be chance - it does not mean the gap is large.")
 
-    # ---- head to head, for choosing between the fine-tunes ----------------
-    #
-    # Every test above is against `rules`, which answers "is this system worth
-    # anything". Model SELECTION asks a different question -- which of the two
-    # fine-tunes is better -- and that comparison is not in the table above.
-    # It needs its own test because the two are paired on the same tokens and
-    # will usually be close: a raw accuracy gap between them is meaningless
-    # until you know the tokens they disagree on are lopsided.
     fts = [n for n in names if n.endswith("-ft")]
     if len(fts) >= 2:
         print()

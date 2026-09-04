@@ -1,43 +1,3 @@
-#!/usr/bin/env python
-"""
-A hand-maintained lexicon applied to the model's answer at inference time.
-
-    python lexicon.py --check tdr bdh nk       # what would each token become?
-    python lexicon.py --list                   # everything currently loaded
-    python lexicon.py --add tdr tidur          # append to the user lexicon
-
-WHY THIS EXISTS
----------------
-The fine-tuned model knows only what it saw in training. A word absent from
-the crawled corpus is invisible to it however well documented it is elsewhere:
-`tdr` is listed in malindo_morph/BM_dict.csv and appears in zero of the 10,099
-corpus sentences, so the rule pipeline resolves it and the model does not.
-Retraining to teach one word costs hours and needs corpus sentences containing
-it, which is often the thing that does not exist.
-
-This closes that gap without retraining. After the model answers, any token
-present in the lexicon has its lemma replaced by the recorded one.
-
-WHAT THIS IS NOT
-----------------
-It is not a way to make the model look better. Every override is RECORDED and
-displayed as coming from the lexicon rather than from the model, because the
-derivation format exists so that a reader can tell which component produced
-each lemma. Silently overwriting the model's answer would destroy exactly the
-property the format was built for.
-
-For the same reason it is OFF in crawl/evaluate.py and cannot be switched on
-there. The reported figures measure the model; a lexicon-assisted system is a
-different system and would have to be reported as one, with its own row.
-
-PRECEDENCE
-----------
-    data/user_lexicon.csv        yours, edited by hand -- wins
-    malindo_morph/BM_dict.csv    the shipped rojak lexicon, 596 entries
-
-so a wrong entry in the shipped file can be corrected without editing it.
-"""
-
 import argparse
 import csv
 import os
@@ -53,7 +13,6 @@ _CACHE = None
 
 
 def _read(path):
-    """{rojak: lemma} from a two-column CSV. Missing file is not an error."""
     out = {}
     if not path.exists():
         return out
@@ -72,7 +31,6 @@ def _read(path):
 
 
 def load(reload=False):
-    """The merged lexicon. User entries override the shipped ones."""
     global _CACHE
     if _CACHE is None or reload:
         merged = _read(SHIPPED_FILE)
@@ -82,49 +40,15 @@ def load(reload=False):
 
 
 def lookup(token):
-    """The recorded lemma for a token, or None."""
     return load().get(token.strip().lower())
 
 
 def _unresolved(step):
-    """Did the model decline to change this token?
-
-    Either it returned the token unchanged, or it tagged the answer KEKAL
-    ("unrecognised, left alone"). Both mean the model had nothing to offer,
-    which is the only situation where a shipped dictionary should be allowed
-    to speak over it.
-    """
     return (step["lemma"].strip().lower() == step["token"].strip().lower()
             or step.get("rule") == "KEKAL")
 
 
 def apply(parsed, rule="LEKSIKON", force_shipped=False):
-    """Correct lemmas in a parsed answer from the lexicon, in place.
-
-    TWO SOURCES, TWO LEVELS OF AUTHORITY
-    ------------------------------------
-    The shipped BM_dict.csv does not always agree with this project's own
-    labelling convention. It maps `nk` to `hendak`, while all 462 occurrences
-    in the gold, validation and silver sets say `mahu` -- so a blanket override
-    would take the dictionary's side against the data the model was trained and
-    measured on, and make a correctly-learned token wrong.
-
-    So the two sources are not equal:
-
-        data/user_lexicon.csv   always wins. You wrote it deliberately, and
-                                it is the only way to correct a token the model
-                                gets confidently wrong.
-        malindo_morph/BM_dict   fills gaps only. It speaks where the model left
-                                a token unchanged or tagged it KEKAL, and stays
-                                quiet where the model committed to an answer.
-
-    `force_shipped` lifts that restriction, for comparing the two behaviours.
-
-    Returns the number of tokens actually changed. Each is marked
-    `from_lexicon` and keeps the model's original answer in `model_lemma`, so
-    the caller can attribute the correction rather than letting it pass as the
-    model's own work.
-    """
     user, shipped = _read(USER_FILE), _read(SHIPPED_FILE)
     changed = 0
 

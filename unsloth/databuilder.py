@@ -1,19 +1,3 @@
-#!/usr/bin/env python
-"""
-Expand the lemmatizer corpus to 500 rows using the sentiment datasets.
-
-Output target changes from `token -> lemma` lines to a full LEMMA SENTENCE.
-
-    python build_500.py
-
-Produces:
-    seed500.jsonl        annotations + per-token provenance (for evaluation)
-    train_chatml.jsonl   ChatML, assistant = lemmatised sentence
-    review_queue.tsv     tokens needing human verification, most frequent first
-
-IMPORTANT: labels here are RULE-GENERATED (silver), not gold. Verify
-review_queue.tsv before treating any of this as ground truth.
-"""
 import os
 import json
 import re
@@ -67,43 +51,31 @@ SLANG = {
     "adalah": "adalah", "ade": "ada", "ada": "ada",
     "gile": "gila", "giler": "gila", "gempak": "gempak",
     "besh": "best", "bestt": "best",
-    # Added from YouTube crawl probe (Aug 2026) - seen in real comments but
-    # absent from the original hand-built lexicon.
     "pulak": "pula", "pown": "pun",
     "cite": "cerita", "citer": "cerita", "crita": "cerita", "cerite": "cerita",
     "tgok": "tengok", "tengok": "tengok",
     "tq": "terima kasih",
+    "lg": "lagi",              
+    "kak": "kakak",           
+    "tpi": "tetapi",            
+    "kiteorg": "kami",          
+    "jd": "jadi",              
+    "betol": "betul",           
+    "tngok": "tengok",         
+    "tgn": "tangan",            
+    "xjadi": "tidak jadi",      
+    "xtau": "tidak tahu",       
+    "xbleh": "tidak boleh",    
+    "xley": "tidak boleh",       
+    "xske": "tidak suka",        
+    "xyh": "tidak payah",        
+}                                
 
-    # Promoted from the hand-labelled gold set (data/gold.jsonl, Aug 2026).
-    # Every entry here is a decision an annotator actually made on a real
-    # sentence - counts are occurrences in the 150 gold sentences. Keeping
-    # the lexicon and the gold labels in agreement matters: the silver
-    # training data is generated from these rules, so a disagreement would
-    # penalise the model for matching its own training signal.
-    "lg": "lagi",                # 4x
-    "kak": "kakak",              # 5x
-    "tpi": "tetapi",             # 4x
-    "kiteorg": "kami",           # 2x
-    "jd": "jadi",                # 2x
-    "betol": "betul",            # 2x
-    "tngok": "tengok",           # 2x
-    "tgn": "tangan",             # 1x
-    "xjadi": "tidak jadi",       # 1x
-    "xtau": "tidak tahu",        # 1x
-    "xbleh": "tidak boleh",      # 1x
-    "xley": "tidak boleh",       # 1x
-    "xske": "tidak suka",        # 1x
-    "xyh": "tidak payah",        # 1x - gold says "tak payah"; "tidak" wins
-}                                #      for consistency with "tak" -> "tidak"
-
-# Discourse particles - deliberately NOT normalised
 PARTICLES = {"la", "lah", "le", "lor", "leh", "meh", "weh", "wei", "woi",
              "je", "jer", "kan", "kot", "eh", "ah", "ha", "hah", "ke", "kah",
              "pun", "tau", "doh", "bah", "yo", "sia",
-             # from the YouTube crawl probe (Aug 2026)
              "beb", "siak", "wey", "weyh", "bro", "bre"}
 
-# Common Malay roots. Replace with MALINDO Morph output for real work.
 ROOTS = set("""
 ada ajar alam alih ambil ampun anak angkat api asal atur awal ayah baca bagi
 bahagi baik baju baru batu bawa bayar beli benar bengkak berat beri bersih
@@ -146,9 +118,7 @@ ada tiada wujud jadi menjadi ialah
 alat anda hebat kes bau nama masa hari malam pagi petang tahun bulan minggu
 """.split())
 
-# Vocabulary induced from the corpus itself (populated by induce_vocab()).
-# Lines with zero Malay markers give English evidence; Malay-dominant lines give
-# Malay evidence. Tokens seen overwhelmingly in one register are assigned to it.
+
 EN_VOCAB = set()
 MS_VOCAB = set()
 
@@ -159,8 +129,6 @@ not no yes very much many good bad great best worst nice
 """.split())
 
 VOWELS = set("aeiou")
-
-# Roots whose first syllable looks like an affix. Never strip these.
 NEVER_STRIP = set("""
 dengan jangan bukan makan minum bulan jalan tahun lawan kawan bahan
 ikan hutan badan tangan kanan bidan hairan sopan bosan pesan lisan
@@ -176,9 +144,6 @@ dia diam diri dinding dingin
 """.split())
 
 
-# ---------------------------------------------------------------------------
-# RULE-BASED LEMMATISER
-# ---------------------------------------------------------------------------
 
 def _try(cand):
     return cand if cand in ROOTS else None
@@ -186,7 +151,7 @@ def _try(cand):
 
 def strip_affix(w):
     """Crude Malay affix stripper. Returns (root, matched_rule) or (None, None)."""
-    # suffixes first
+
     base = w
     for suf in ("kannya", "annya", "inya", "nya", "kan", "an", "i"):
         if base.endswith(suf) and len(base) - len(suf) >= 3:
@@ -199,14 +164,14 @@ def strip_affix(w):
         base_alt = base
 
     for cand in (base_alt, base):
-        # simple prefixes
+      
         for pre in ("memper", "member", "diper", "keter", "ber", "ter", "per",
                     "di", "ke", "se"):
             if cand.startswith(pre) and len(cand) - len(pre) >= 3:
                 r = _try(cand[len(pre):])
                 if r:
                     return r, f"{pre}-"
-                # ber- + r-initial doubling: berlari -> lari
+            
                 if pre == "ber" and _try("r" + cand[len(pre):]):
                     return "r" + cand[len(pre):], "ber-"
 
@@ -236,8 +201,7 @@ def strip_affix_loose(w):
         if base.endswith(suf) and len(base) - len(suf) >= 4:
             base = base[: -len(suf)]
             break
-    # Only unambiguous prefixes. ke-, se-, me-, pe- are excluded: they eat the
-    # first syllable of roots like kerana, sebab, memang, perlu.
+
     for pre, repl in (("meng", "k"), ("meny", "s"), ("mem", "p"), ("men", "t"),
                       ("peng", "k"), ("peny", "s"), ("pem", "p"), ("pen", "t"),
                       ("ber", ""), ("ter", ""), ("di", "")):
@@ -349,9 +313,7 @@ def lemma_of(tok):
     return w, "en", "codeswitch_guess"      # NEEDS REVIEW
 
 
-# ---------------------------------------------------------------------------
-# CORPUS MINING
-# ---------------------------------------------------------------------------
+
 
 MARKERS = set(SLANG) | PARTICLES | {
     "yang", "dan", "ini", "itu", "saya", "kita", "dia", "di", "ke", "dari",
@@ -447,7 +409,6 @@ def mine():
     return cands
 
 
-# ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
     "Anda adalah pelemma bahasa Melayu. Tukarkan ayat rojak kepada ayat "

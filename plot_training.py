@@ -1,39 +1,3 @@
-#!/usr/bin/env python
-"""
-Chart the training and development loss curves.
-
-    python plot_training.py                      # every model trained so far
-    python plot_training.py --model llama        # just one
-    python plot_training.py --out figures/       # where to write the PNG
-    python plot_training.py --table              # print the numbers instead
-
-WHAT THIS PLOTS, AND WHAT IT CANNOT
------------------------------------
-Loss, not accuracy. Fine-tuning optimises cross-entropy over next-token
-prediction, so loss is the only quantity the training loop ever computes.
-Accuracy for this task means generating a full derivation and comparing every
-lemma against the gold answer, which is a generation pass rather than a
-forward pass -- roughly twenty times the cost. Measuring it at each evaluation
-would consume more of the budget than the training itself.
-
-So the division of labour is:
-
-    this script        loss curves, from the training run       (free)
-    crawl/evaluate.py  accuracy, F1, WER, CER, McNemar          (once, at the end)
-
-Both belong in the report and they answer different questions. The loss curve
-shows whether the run was still learning when it stopped -- which, on a budget
-this tight, is the thing a reader will want to know. The evaluation table shows
-whether the result is any good.
-
-READING THE CURVE
------------------
-Training loss falling while dev loss rises is overfitting, and the checkpoint
-selection has already handled it: the adapter saved is the one at the lowest
-dev loss, not the last one. Both still falling at the right-hand edge means
-the budget ran out before the model did, which is the expected shape here.
-"""
-
 import argparse
 import glob
 import json
@@ -44,13 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "unsloth" / "training_runs"
 
-# Train and dev get genuinely different hues, not a light/dark pair of the
-# same one -- a shade difference reads as "the same line, slightly faded" at
-# a glance, which is the opposite of what the dev curve needs: it is the
-# number that actually matters (it is what picks the checkpoint), so it has
-# to be the color the eye lands on first.
-TRAIN_COLOURS = {"llama": "#93c5fd", "qwen": "#fcd34d"}   # pale, recedes
-DEV_COLOURS = {"llama": "#dc2626", "qwen": "#059669"}     # bold, leads
+TRAIN_COLOURS = {"llama": "#93c5fd", "qwen": "#fcd34d"}   
+DEV_COLOURS = {"llama": "#dc2626", "qwen": "#059669"}    
 FALLBACK_TRAIN, FALLBACK_DEV = "#94a3b8", "#0f172a"
 
 
@@ -125,13 +84,11 @@ def print_table(runs):
 
 def plot(runs, out_dir):
     import matplotlib
-    matplotlib.use("Agg")            # no display on a headless box
+    matplotlib.use("Agg")           
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(9.5, 5.6), dpi=140)
 
-    # Placed above the point for the first run, below for the second, so two
-    # callout boxes near the same step never sit on top of each other.
     box_side = 1
     for name, r in runs.items():
         tc = TRAIN_COLOURS.get(name, FALLBACK_TRAIN)
@@ -150,17 +107,8 @@ def plot(runs, out_dir):
                     mfc="white", mew=1.4, zorder=4,
                     label="%s  dev" % name)
 
-            # A light drop-line anchors the best point to the x-axis (fixed at
-            # y=0 below, not read back from get_ylim -- asking for the current
-            # limit here, before the axis has seen all the data, would freeze
-            # autoscaling at whatever placeholder range an empty axes starts
-            # with, and every curve above it would be clipped off).
             ax.plot([best_step, best_step], [best_loss, 0],
                     color=dc, lw=0.8, ls=":", alpha=0.5, zorder=1)
-
-            # A plain filled circle, sized up from the ordinary dev markers
-            # rather than swapped for a different shape -- the point is to
-            # emphasise the same series, not to introduce a new symbol.
             ax.scatter([best_step], [best_loss], marker="o", s=95,
                       facecolors=dc, edgecolors="black", linewidths=1.0,
                       zorder=6)

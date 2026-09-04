@@ -1,30 +1,3 @@
-#!/usr/bin/env python
-"""
-Turn raw YouTube comments into a rojak sentence corpus.
-
-    python crawl/build_corpus.py                  # build the corpus
-    python crawl/build_corpus.py --validate       # dump a hand-check sample
-    python crawl/build_corpus.py --min-hits 3     # stricter rojak threshold
-
-One raw COMMENT becomes zero or more SENTENCE rows. Rojak detection is a
-layered filter, each layer cheap and explainable in the report:
-
-  1  script      >= 80% latin chars           drops zh/ta/ar comments
-  2  malay       >= 2 function-word hits      is this Malay at all
-  3  rojak       >= MIN_HITS marker hits      is it rojak, not standard Malay
-
-Layer 3 markers reuse the SLANG and PARTICLES lexicons from
-unsloth/databuilder.py, so there is one source of truth, plus orthographic
-patterns that need no lexicon at all (x-negation, digit reduplication,
-elongation, vowel-dropping).
-
-Outputs:
-    data/corpus.jsonl      kept sentences, with per-sentence rojak features
-    data/gold_pool.jsonl   150 sentences stratified by band, for hand-labelling
-    data/filter_check.tsv   --validate only: 100 kept + 50 rejected
-    data/filter_check.xlsx  the same sample, ready to label in Excel
-"""
-
 import argparse
 import html
 import json
@@ -73,19 +46,10 @@ SLANG = {
     "adalah": "adalah", "ade": "ada", "ada": "ada",
     "gile": "gila", "giler": "gila", "gempak": "gempak",
     "besh": "best", "bestt": "best",
-    # Added from YouTube crawl probe (Aug 2026) - seen in real comments but
-    # absent from the original hand-built lexicon.
     "pulak": "pula", "pown": "pun",
     "cite": "cerita", "citer": "cerita", "crita": "cerita", "cerite": "cerita",
     "tgok": "tengok", "tengok": "tengok",
     "tq": "terima kasih",
-
-    # Promoted from the hand-labelled gold set (data/gold.jsonl, Aug 2026).
-    # Every entry here is a decision an annotator actually made on a real
-    # sentence - counts are occurrences in the 150 gold sentences. Keeping
-    # the lexicon and the gold labels in agreement matters: the silver
-    # training data is generated from these rules, so a disagreement would
-    # penalise the model for matching its own training signal.
     "lg": "lagi",                # 4x
     "kak": "kakak",              # 5x
     "tpi": "tetapi",             # 4x

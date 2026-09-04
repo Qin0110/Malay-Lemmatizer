@@ -1,12 +1,3 @@
-#!/usr/bin/env python
-"""Assert the three-way Train / Dev / Test design holds on disk.
-
-    python crawl/verify_splits.py
-
-Every claim the experiment rests on is re-derived from the files themselves,
-not from the manifest's own bookkeeping. Exits non-zero on the first failure,
-so it is safe to run in a pre-training check.
-"""
 import json
 import sys
 from pathlib import Path
@@ -16,20 +7,9 @@ SILVER = ROOT / "data" / "silver.jsonl"
 GOLD = ROOT / "data" / "gold.jsonl"
 GOLD_POOL = ROOT / "data" / "gold_pool.jsonl"
 MANIFEST = ROOT / "data" / "split_manifest.json"
-# The ChatML the CURRENT skill trains on. Pointed at training_split.jsonl
-# until the derivation format replaced it, which made this script report a
-# false failure: it was comparing v1 bare-sentence targets against silver
-# labels that had since been re-proposed under the derivational-affix policy.
 TRAIN = ROOT / "unsloth" / "data" / "train_reasoning.jsonl"
 DEV = ROOT / "unsloth" / "data" / "dev_reasoning.jsonl"
-# The fourth split, added after this script was written: the human-labelled
-# set that model selection runs on. It must be disjoint from everything else,
-# and nothing here knew it existed.
 VAL = ROOT / "data" / "val.jsonl"
-
-# The split size is a run-time choice (--n), so it is read from the manifest
-# rather than hard-coded. What is asserted is the arithmetic: the two halves
-# must reconstruct the silver set exactly, in the recorded ratio.
 EXPECT_GOLD = 150
 
 failures = []
@@ -89,8 +69,6 @@ check("train n gold = 0", not (train_ids & gold_ids),
 check("dev n gold = 0", not (dev_ids & gold_ids),
       str(sorted(dev_ids & gold_ids)[:3]))
 if val_ids:
-    # Model selection happens on this split, so a leak here would let a model
-    # be chosen on data it trained on, or on the test set.
     check("val n train = 0", not (val_ids & train_ids),
           str(sorted(val_ids & train_ids)[:3]))
     check("val n dev = 0", not (val_ids & dev_ids),
@@ -118,11 +96,7 @@ check("one distinct system prompt in train",
 check("train and dev share that system prompt",
       {m["messages"][0]["content"] for m in train}
       == {m["messages"][0]["content"] for m in dev})
-# The target used to BE the lemma sentence, so comparing it to lemma_text
-# was the whole check. The v2 target is a derivation table that ends in an
-# <ayat> block, so the sentence has to be read out of it first -- comparing
-# the raw target against lemma_text now fails on all 7,200 rows and says
-# nothing about whether the labels agree.
+
 sys.path.insert(0, str(ROOT))
 import skill                                                   # noqa: E402
 
@@ -133,8 +107,6 @@ for r in silver:
         continue
     target = by_id_train[r["text"]]["messages"][2]["content"]
     got = skill.parse_response(target)
-    # Compare what the target actually teaches: the per-token lemmas, and the
-    # sentence it closes with. Both must match the silver annotation.
     lemmas_ok = [s["lemma"] for s in got["steps"]] == [e["l"] for e in r["lemmas"]]
     if not (lemmas_ok and got["sentence"].split() == r["lemma_text"].split()):
         mismatch += 1
