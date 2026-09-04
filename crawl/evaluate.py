@@ -722,7 +722,7 @@ def error_table(rows, results, a_name="rules", b_name=None):
 
 def main(with_model, reuse, adapters, with_base=False, on_dev=False,
          reuse_base=False, show_errors=False, on_val=False,
-         with_base_alt=False):
+         with_base_alt=False, models_only=False):
     if on_dev:
         rows = load_dev_rows()
         label = "dev"
@@ -794,7 +794,18 @@ def main(with_model, reuse, adapters, with_base=False, on_dev=False,
         if with_model or (reuse and preds_path(ad).exists()):
             run_neural(label_for(ad), rows, ad, reuse, results, fmt_fail)
 
+    # --models-only narrows every table below to the neural systems. The
+    # non-neural rows are still COMPUTED (they cost nothing and the honest-
+    # subset section needs `rules` to have a reference), they are just not
+    # printed -- so a run that reports four models can still be compared
+    # against a run that reports eight, from the same cached predictions.
     names = list(results)
+    if models_only:
+        keep = [n for n in names if n.startswith("base-") or n.endswith("-ft")]
+        if keep:
+            names = keep
+            print("--models-only: showing the %d language models; the "
+                  "non-neural baselines are omitted.\n" % len(names))
     print("=" * 80)
     print("%-12s %10s %10s %10s %11s %12s"
           % ("system", "overall", "CHANGED", "unchanged", "sent-exact",
@@ -958,6 +969,9 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--model", action="store_true",
                    help="also evaluate the fine-tuned adapter (needs GPU)")
+    p.add_argument("--models-only", action="store_true",
+                   help="report only the language models, omitting copy / "
+                        "MALINDO / rules from every table")
     p.add_argument("--base-qwen", action="store_true",
                    help="also evaluate the UNFINE-TUNED Qwen base model")
     p.add_argument("--adapter", action="append", default=None,
@@ -992,4 +1006,5 @@ if __name__ == "__main__":
     names = a.adapter or ["lemmatizer_lora_llama"]
     main(a.model, a.reuse, [ROOT / "unsloth" / n for n in names],
          a.base, a.dev, reuse_base=a.reuse_base, show_errors=a.errors,
-         on_val=a.val, with_base_alt=a.base_qwen)
+         on_val=a.val, with_base_alt=a.base_qwen,
+         models_only=a.models_only)
