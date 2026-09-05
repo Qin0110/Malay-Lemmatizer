@@ -10,14 +10,6 @@ SKILL_VERSION = "v1-reasoning"
 SKILL_FILE = "skill.json"
 
 
-# ---------------------------------------------------------------------------
-# RULE VOCABULARY
-# ---------------------------------------------------------------------------
-#
-# Nine tags: the smallest set that still separates the error modes worth
-# telling apart. Each one names a distinct thing that can go wrong, so a
-# confusion matrix over these tags points at a specific fix.
-
 RULES = {
     "KAMUS":    "kata dasar, sudah berbentuk lema",
     "RINGKAS":  "singkatan atau slanga, dikembangkan",
@@ -44,20 +36,20 @@ RULES_EN = {
 
 
 SRC_TO_RULE = {
-    "dict":       ("KAMUS",    False),  
+    "dict":       ("KAMUS",    False),
     "deriv":      ("KAMUS",    False),
-    "slang":      ("RINGKAS",  False), 
-    "particle":   ("PARTIKEL", False),  
-    "num":        ("NOMBOR",   False),   
-    "redup":      ("GANDA",    False),   
-    "elong":      ("PANJANG",  False),  
+    "slang":      ("RINGKAS",  False),
+    "particle":   ("PARTIKEL", False),
+    "num":        ("NOMBOR",   False),
+    "redup":      ("GANDA",    False),
+    "elong":      ("PANJANG",  False),
     "codeswitch": ("INGGERIS", False),
-    "affix":      ("IMBUHAN",  True),    
+    "affix":      ("IMBUHAN",  True),
 
     "ambiguous":  ("KAMUS",    True),
-   
+
     "dict_check": ("KEKAL",    True),
-    "oov":        ("KEKAL",    True),   
+    "oov":        ("KEKAL",    True),
     "unknown":    ("KEKAL",    True),
 }
 
@@ -96,8 +88,6 @@ JANGAN:
 - jangan tulis apa-apa di luar <lema> dan <ayat>"""
 
 
-
-
 PROMPTS = {"v1-reasoning": SYSTEM_PROMPT}
 DEFAULT_VERSION = SKILL_VERSION
 
@@ -120,7 +110,7 @@ def version_for(adapter_dir):
 
 
 def prompt_for(adapter_dir):
- 
+
     v = version_for(adapter_dir)
     return PROMPTS[v], v
 
@@ -133,8 +123,6 @@ def write_version(adapter_dir, version=SKILL_VERSION):
         json.dump({"skill_version": version, "skill_name": SKILL_VERSION},
                   fh, indent=2)
     return path
-
-
 
 
 _REDUP_RE = re.compile(r"^(.+?)2$")
@@ -166,7 +154,7 @@ def rule_for(src, token=None, lemma=None):
 
 
 def render_target(row):
-    
+
     lines, words = [], []
     for e in row["lemmas"]:
         tag, uncertain = rule_for(e["src"], e["t"], e["l"])
@@ -186,17 +174,13 @@ def to_chatml(row, system_prompt=SYSTEM_PROMPT):
     ]}
 
 
-# ---------------------------------------------------------------------------
-# PARSE: model answer -> structured result
-# ---------------------------------------------------------------------------
-
 LEMA_BLOCK_RE = re.compile(r"<lema>(.*?)</lema>", re.S | re.I)
 AYAT_BLOCK_RE = re.compile(r"<ayat>(.*?)</ayat>", re.S | re.I)
 LINE_RE = re.compile(r"^\s*(\S+)\s*\|\s*([A-Za-z]+)(\??)\s*\|\s*(.+?)\s*$")
 
 
 def parse_response(text):
-   
+
     block = LEMA_BLOCK_RE.search(text)
     body = block.group(1) if block else text
 
@@ -226,8 +210,6 @@ def _collapse_ws(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-
-
 TAGS_EN = {
     "KAMUS":    "dictionary",
     "RINGKAS":  "slang expanded",
@@ -251,7 +233,7 @@ def explain(rule, uncertain=False, lang="ms"):
 
 
 def format_result(parsed, lang="ms"):
-  
+
     tags = TAGS_EN if lang == "en" else None
     out = [parsed["sentence"], ""]
     width = max((len(s["token"]) for s in parsed["steps"]), default=0)
@@ -266,10 +248,6 @@ def format_result(parsed, lang="ms"):
                    else "[malformed answer]")
     return "\n".join(out)
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 DEMO_RESPONSE = """\
 <lema>
@@ -296,7 +274,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    p = argparse.ArgumentParser()
     p.add_argument("--card", action="store_true", help="print the system prompt")
     p.add_argument("--rules", action="store_true", help="print the rule table")
     p.add_argument("--demo", action="store_true",

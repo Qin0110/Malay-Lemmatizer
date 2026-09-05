@@ -1,6 +1,5 @@
 import argparse
 import csv
-import os
 import sys
 from pathlib import Path
 
@@ -21,8 +20,7 @@ def _read(path):
             for row in csv.DictReader(fh):
                 key = (row.get("rojak") or "").strip().lower()
                 val = (row.get("actual") or "").strip()
-                # First spelling of a key wins, matching bm_dict() in
-                # make_goldsheet.py so both halves resolve identically.
+                # first spelling wins, matching bm_dict() in make_goldsheet.py
                 if key and val and key not in out:
                     out[key] = val
     except (OSError, csv.Error) as exc:
@@ -57,7 +55,7 @@ def apply(parsed, rule="LEKSIKON", force_shipped=False):
         want = user.get(key)
         source = "yours"
         if want is None:
-            # Shipped entries only speak into a gap, unless told otherwise.
+            # shipped entries only fill a gap, unless forced
             if not (force_shipped or _unresolved(step)):
                 continue
             want = shipped.get(key)
@@ -113,7 +111,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    p = argparse.ArgumentParser()
     p.add_argument("--check", nargs="+", metavar="TOKEN",
                    help="what the lexicon would make of these tokens")
     p.add_argument("--add", nargs=2, metavar=("TOKEN", "LEMMA"),

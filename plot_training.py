@@ -8,18 +8,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "unsloth" / "training_runs"
 
-TRAIN_COLOURS = {"llama": "#93c5fd", "qwen": "#fcd34d"}   
-DEV_COLOURS = {"llama": "#dc2626", "qwen": "#059669"}    
+TRAIN_COLOURS = {"llama": "#93c5fd", "qwen": "#fcd34d"}
+DEV_COLOURS = {"llama": "#dc2626", "qwen": "#059669"}
 FALLBACK_TRAIN, FALLBACK_DEV = "#94a3b8", "#0f172a"
 
 
 def latest_state(adapter_dir):
-    """The newest trainer_state.json under a run directory, or None.
-
-    Read from the checkpoints rather than from a summary file, so this works
-    on a run that is still in progress -- which is the moment you most want to
-    see the curve.
-    """
+    """Newest trainer_state.json under a run dir; works mid-run."""
     states = glob.glob(str(adapter_dir / "checkpoint-*" / "trainer_state.json"))
     if not states:
         return None
@@ -84,7 +79,7 @@ def print_table(runs):
 
 def plot(runs, out_dir):
     import matplotlib
-    matplotlib.use("Agg")           
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(9.5, 5.6), dpi=140)
@@ -131,8 +126,7 @@ def plot(runs, out_dir):
     ax.set_title("Fine-tuning loss (solid = train, dashed = dev)", fontsize=11)
     ax.tick_params(labelsize=9.5)
     ax.grid(alpha=0.25, lw=0.6)
-    ax.set_ylim(bottom=0)   # set only now: earlier would freeze autoscaling
-                            # before the top had seen the real data range
+    ax.set_ylim(bottom=0)   # only now, so autoscaling has seen the data range
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(frameon=True, fontsize=9.5, loc="upper right",
              facecolor="white", edgecolor="#cbd5e1", framealpha=0.95)
@@ -146,7 +140,7 @@ def plot(runs, out_dir):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    p = argparse.ArgumentParser()
     p.add_argument("--model", action="append", choices=("llama", "qwen"),
                    help="restrict to one family (repeatable)")
     p.add_argument("--out", default="figures", help="output directory")

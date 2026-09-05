@@ -212,7 +212,6 @@ def main():
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     p = argparse.ArgumentParser(
-        description=__doc__.split("\n")[1],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="models: %s (or any HF id / adapter path)"
                % ", ".join(MODELS))

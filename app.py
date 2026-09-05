@@ -4,41 +4,19 @@ Malay Rojak Lemmatiser - interactive demo.
 
     streamlit run app.py
 
-The same pipeline main.py runs, with the intermediate stages made visible:
+Same pipeline as main.py, with the stages made visible: preprocess -> model
+-> lexicon corrections -> lemma sentence plus the derivation behind it.
 
-    your sentence
-       |
-       v  preprocess.py   normalise -> eliminate -> tokenise -> expand slang
-       v  the model       one derivation line per token
-       v  lexicon.py      dictionary corrections, labelled as such
-       v
-    lemma sentence + the derivation behind it
+Serves one system, the fine-tuned Llama selected on the validation set; run
+another by hand with main.py --model qwen-ft (or llama-base, qwen-base).
 
-The page serves ONE system: the fine-tuned Llama 3.2 3B selected on the
-validation set. There is no model picker, because a demonstration should show
-what the project recommends rather than offer a forty-second model swap in
-front of whoever is watching. The four-way comparison belongs to the
-evaluation, which already reports it; to run another model by hand, use
-main.py --model qwen-ft (or llama-base, qwen-base).
-
-NOT named streamlit.py on purpose: a module of that name in the project root
-shadows the streamlit package itself, and `import streamlit` then finds the
-project file instead of the library.
+Not named streamlit.py on purpose: a module of that name in the project root
+shadows the streamlit package itself.
 """
 
-# pyarrow is imported FIRST, before anything can pull in torch, and the order
-# is the whole point of the line -- st.dataframe serialises through Arrow, and
-# Arrow loaded after torch corrupts the process heap on Windows. The symptom is
-# brutal to read: the lemma renders correctly, then the server dies with
-# exception 0xC0000374 and no Python traceback, so the browser shows only
-# "Connection error. Is Streamlit still running?" and the crash looks like it
-# came from the model rather than from drawing the results table.
-#
-#     import order  torch -> pyarrow   first table render kills the server
-#     import order  pyarrow -> torch   survives repeated runs
-#
-# Do not move this below the other imports, and do not "tidy" it into the
-# third-party group.
+# Must stay FIRST, above anything that can pull in torch: Arrow loaded after
+# torch corrupts the process heap on Windows and kills the server (0xC0000374,
+# no traceback) on the first st.dataframe render. Do not move or regroup.
 import pyarrow  # noqa: F401  (imported for its side effect: load order)
 
 import sys
@@ -111,8 +89,7 @@ def _to_cpu(bundle):
     try:
         bundle[0].cpu()
     except Exception:                                           # noqa: BLE001
-        # A quantised model that refuses to move is still worth collecting;
-        # the caller will find out from the free figure.
+        # a quantised model that refuses to move is still worth collecting
         pass
 
 
@@ -135,9 +112,8 @@ def unload():
         on_gpu(_to_cpu, bundle)
     except Exception:                                           # noqa: BLE001
         pass
-    # Dropped here as well: the worker released its own reference, but this
-    # frame still held one, and the sweep below is what returns the blocks.
-    del bundle
+    del bundle          # this frame's reference, so the sweep can free the blocks
+
     try:
         on_gpu(_sweep)
     except Exception:                                           # noqa: BLE001
@@ -174,7 +150,8 @@ with st.sidebar:
     on_disk = (SELECTED in cli.BASE_MODELS
                or (cli.MODELS[SELECTED] / "adapter_model.safetensors").exists())
     if not on_disk:
-        st.error("%s is not on disk. Run import_adapters.py to add it."
+        st.error("%s is not on disk. Train it with `python train.py --model "
+                 "llama`, or copy the adapter folder into unsloth/."
                  % SELECTED)
 
     status = st.empty()

@@ -1,45 +1,40 @@
-# Command reference
+# Malay Rojak Lemmatiser
 
 Every command in the pipeline, in the order it runs. Anything marked **GPU**
 loads a 3B model; everything else runs on CPU.
 
-On Windows use the venv interpreter explicitly, because the system Python has
-CPU-only torch and fails with a confusing error:
+On Windows use the venv interpreter explicitly — the system Python has CPU-only
+torch and fails with a confusing error. The commands below say `python` for
+brevity; substitute this path:
 
 ```
 E:/Malay_Lemmatizer/venv/Scripts/python.exe
 ```
 
-The commands below say `python` for brevity. Substitute that path.
-
 ---
 
-## 0. Setup — a teammate starting from a clone
+## 0. Setup from a clone
 
 The repo does not contain the model weights: a LoRA adapter is 110–126 MB and
-GitHub rejects any file over 100 MB. Get `adapters.zip` separately, extract it
-anywhere, then:
+GitHub rejects any file over 100 MB. Either train them (section 4) or extract
+the two adapter folders into `unsloth/`:
 
-```bash
-python import_adapters.py --from "C:/Users/you/Downloads/adapters" --dry-run
-python import_adapters.py --from "C:/Users/you/Downloads/adapters"
+```
+unsloth/lemmatizer_lora_llama/
+unsloth/lemmatizer_lora_qwen/
 ```
 
-`--from` points at the extracted **folder**, not the `.zip`. The dry run
-verifies both adapters carry the same step count before anything is copied — a
-mismatch would mean the two models saw different amounts of data, and the
-comparison between them would measure schedule rather than pretraining.
+Check that `run_meta.json` in each reports the same step count, or the
+comparison between them measures schedule rather than pretraining.
 
-Without the weights everything except generation still works: preprocessing,
-the rule baselines, split verification and all the data scripts.
+Without the weights everything except generation still works.
 
 ---
 
 ## 1. Data collection — already done, do not re-run
 
-These built the corpus. Re-running them would produce different sentence ids
-and orphan the 300 hand-labelled sentences, which cost hours to produce and
-cannot be recovered. They are documented for the report, not for use.
+Re-running these produces different sentence ids and orphans the 300
+hand-labelled sentences, which cannot be recovered.
 
 ```bash
 python crawl/youtube_crawl.py --list          # show configured channels
@@ -58,8 +53,7 @@ python crawl/build_silver.py --resplit        # redo the split without relabelli
 
 ## 2. Labelling
 
-The gold and validation sets. Both sheets are already labelled; these are here
-for the record and for expanding the data later.
+Both sheets are already labelled; these are here for expanding the data later.
 
 ```bash
 # build a sheet to label
@@ -75,12 +69,11 @@ python crawl/make_goldsheet.py --collect --pool data/val_pool.jsonl \
     --sheet data/val_sheet.xlsx --out data/val.jsonl              # -> data/val.jsonl
 ```
 
-`--pool`, `--sheet` and `--out` must be given together. Overriding only one
-would write one set's rows into another set's files.
+`--pool`, `--sheet` and `--out` must be given together, or one set's rows land
+in another set's files.
 
-**Save and close Excel before collecting.** An open workbook holds its edits in
-memory, and the collector reads the file from disk — it will silently see zero
-corrections.
+**Save and close Excel before collecting.** The collector reads from disk, so an
+open workbook silently yields zero corrections.
 
 ### Migrations, already applied
 
@@ -90,8 +83,8 @@ python crawl/repropose.py --file data/silver.jsonl    # after a rule change
 python crawl/retag_english.py --dry-run               # oov -> codeswitch retag
 ```
 
-Both refuse to overwrite a `human` label. Always `--dry-run` first: a
-non-dry run on the wrong lexicon state once destroyed 3,928 slang expansions.
+Both refuse to overwrite a `human` label. Always `--dry-run` first: a non-dry
+run on the wrong lexicon state once destroyed 3,928 slang expansions.
 
 ---
 
@@ -103,38 +96,32 @@ python crawl/build_sft.py                      # -> unsloth/data/*_reasoning.jso
 python crawl/verify_splits.py                  # assert the four-way design holds
 ```
 
-`verify_splits.py` is the integrity check: it re-derives train/dev/val/test
-disjointness from the files themselves and confirms the training targets match
-the silver labels. Run it after any data change.
+Run `verify_splits.py` after any data change: it re-derives train/dev/val/test
+disjointness from the files and confirms the targets match the silver labels.
 
 ---
 
 ## 4. Fine-tuning — **GPU**
 
-Both models must receive the **same number of steps**, or the comparison
-measures which model is faster rather than which pretraining suits Malay.
+QLoRA: the 4-bit base is frozen, LoRA adapters (r=16, α=16) train on all seven
+projections. Both models must receive the **same number of steps**, or the
+comparison measures which model is faster rather than which pretraining suits
+Malay.
 
 ```bash
 python train.py --model llama --dry-run        # config only, no GPU
 python train.py --model llama --verify         # check the loss mask, ~1 min
 
-# on a T4 (Colab): the full epoch, 1800 steps
-python train.py --model llama --bs 4 --accum 1 --budget-mins 0
-python train.py --model qwen  --bs 4 --accum 1 --budget-mins 0
-
-# on a 4 GB laptop card: fit a wall-clock budget, then pin the second model
-python train.py --model llama --budget-mins 120
-python train.py --model qwen --max-steps <whatever llama got>
+# the full epoch, 1800 steps, at the default batch 4 x 1
+python train.py --model llama
+python train.py --model qwen
 ```
 
 Useful flags: `--bs 1 --accum 8` if it runs out of memory, `--lora-attn-only`
-to train 9.2M parameters instead of 24.3M, `--max-steps N` to skip the timing
-probe entirely.
+to train 9.2M parameters instead of 24.3M, `--max-steps N` to stop early.
 
-Each run writes `run_meta.json` beside its adapter, and the second run reads
-the first one back and prints whether the two are comparable.
-
-For Colab, upload `train_lemmatiser_t4.ipynb` and `colab_bundle.zip`.
+Each run writes `run_meta.json` beside its adapter, and the second run reads the
+first one back and prints whether the two are comparable.
 
 ```bash
 python plot_training.py                        # loss curves -> figures/
@@ -150,40 +137,30 @@ Model **selection** happens on the validation split. The gold test set is used
 reporting its score would mean the number no longer estimates anything.
 
 ```bash
-# rule baselines only, no GPU, ~30 seconds
-python crawl/evaluate.py --val
-python crawl/evaluate.py                       # same, on the gold test set
-
-# neural systems — GPU, ~45-60 min each
+# generate predictions — GPU, ~45-60 min each
 python crawl/evaluate.py --val --base                                      # base Llama
 python crawl/evaluate.py --val --base-qwen                                 # base Qwen
 python crawl/evaluate.py --val --model --adapter lemmatizer_lora_llama
 python crawl/evaluate.py --val --model --adapter lemmatizer_lora_qwen
 
-# all eight systems in one table, from cache, no GPU
+# every cached model in one table, no GPU
 python crawl/evaluate.py --val --reuse \
     --adapter lemmatizer_lora_llama --adapter lemmatizer_lora_qwen
 
 # the final number, selected model only
-python crawl/evaluate.py --model --adapter lemmatizer_lora_llama --base
+python crawl/evaluate.py --reuse --adapter lemmatizer_lora_llama
 ```
 
-Predictions cache to `data/model_predictions_<split>_<model>.json` as each
-model finishes, so a crash partway costs only the model in progress. The split
-is part of the filename because it has to be: the same adapter scored on `--val`
-and on gold produces two different files, and when the name carried only the
-adapter they overwrote each other silently. `--reuse` rebuilds every table from
-those with no GPU, which is how to regenerate report figures.
+Predictions cache to `data/model_predictions_<split>_<model>.json` as each model
+finishes, so a crash partway costs only the model in progress. The split is part
+of the filename because the same adapter scored on `--val` and on gold produces
+two different files. `--reuse` rebuilds the tables from cache with no GPU, and
+scores every base and adapter that has one.
 
-The default table is the six reported metrics — overall token accuracy,
-precision, recall, F1, WER and CER — one row per language model (the
-un-fine-tuned bases and the fine-tunes). `--baselines` adds the non-neural rows
-back (copy, MALINDO, dict-root, rules); `--full` adds the diagnostic tables
-(CHANGED / unchanged split, sentence-exact, per-band and per-source accuracy,
-the honest subset, McNemar).
-
-`--errors` prints every token where the rules and the fine-tune disagree, with
-the gold answer.
+Two tables print: the six reported metrics (overall token accuracy, precision,
+recall, F1, WER, CER), then the confusion matrix behind them. The matrix cells
+sum to slightly more than the token count — a token that needed a change and
+received the wrong one counts as both a false positive and a false negative.
 
 ---
 
@@ -211,17 +188,13 @@ streamlit run app.py
 
 Opens at `http://localhost:8501`. Same pipeline as `main.py`, with the lemma
 sentence, the per-token derivation, the preprocessing stages and the raw model
-output all on one page. The sidebar switches between the four evaluated models,
-so a base model's format failures can be shown on demand.
-
-The model stays in GPU memory once loaded, so switching models in the sidebar
-loads a second one. On a 4 GB card, restart the app rather than flipping
-between them mid-session.
+output on one page. It serves the selected fine-tune only; use `main.py --model`
+to run another. The model stays in GPU memory once loaded — on a 4 GB card,
+restart the app rather than loading a second one.
 
 ### Adding a word without retraining
 
-The model knows only what it saw in training. A word absent from the corpus is
-invisible to it however well documented elsewhere.
+The model knows only what it saw in training.
 
 ```bash
 python lexicon.py --check tdr bdh zzz          # what the lexicon makes of these
@@ -229,21 +202,19 @@ python lexicon.py --add tdo tidur              # append to data/user_lexicon.csv
 python lexicon.py --list                       # everything loaded
 ```
 
-`data/user_lexicon.csv` is read by two things, and it takes precedence over the
-shipped `BM_dict.csv` in both:
+`data/user_lexicon.csv` takes precedence over the shipped `BM_dict.csv` in both
+places it is read:
 
 - **preprocess.py stage 4**, which expands slang *before* the model sees it
 - **lexicon.py**, which corrects the model's answer *afterwards*
 
 The shipped dictionary does not always match this project's annotation — it maps
 `nak` to `hendak` where all 38 gold occurrences say `mahu` — so the user file
-records the project's own conventions. Every token where the two disagreed has
-been aligned to the gold labels.
+records the project's own conventions.
 
-Corrections are applied **after** the model answers and are labelled `LEKSIKON`
-in the output, so a reader can always tell which component produced a lemma.
-Your entries always win; the shipped `BM_dict.csv` only fills gaps the model
-left unresolved — it disagrees with this project's conventions in places, and a
+Corrections are applied after the model answers and are labelled `LEKSIKON`, so
+a reader can tell which component produced a lemma. Your entries always win; the
+shipped `BM_dict.csv` only fills gaps the model left unresolved, because a
 blanket override once made a correctly-learned token wrong.
 
 ---

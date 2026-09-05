@@ -6,7 +6,6 @@ import json
 import math
 import os
 import sys
-import time
 from pathlib import Path
 
 
@@ -19,7 +18,6 @@ import skill                                                   # noqa: E402
 
 TRAIN_FILE = ROOT / "unsloth" / "data" / "train_reasoning.jsonl"
 DEV_FILE = ROOT / "unsloth" / "data" / "dev_reasoning.jsonl"
-
 
 
 MODELS = {
@@ -40,17 +38,13 @@ MODELS = {
 }
 
 
-
 SEED = 3407
-MAX_SEQ_LEN = 896        
-EPOCHS = 1               
-                 
-BATCH_SIZE = 1           
-                         
-ACCUM_STEPS = 4
-BUDGET_MINS = 120        
-EVALS = 5               
-                      
+MAX_SEQ_LEN = 896
+EPOCHS = 1
+
+BATCH_SIZE = 4
+ACCUM_STEPS = 1
+EVALS = 5
 EVAL_ROWS = 64
 LORA_RANK = 16
 LEARNING_RATE = 2e-4
@@ -59,18 +53,9 @@ LEARNING_RATE = 2e-4
 ATTN_ONLY = ["q_proj", "k_proj", "v_proj", "o_proj"]
 ALL_LINEAR = ATTN_ONLY + ["gate_proj", "up_proj", "down_proj"]
 
-PROBE_MICRO = 10         # micro-batches timed; a step is ACCUM_STEPS of them
-PROBE_SKIP = 3           # first ones carry one-off kernel compilation
-PROBE_MARGIN = 1.15      # the probe runs before the optimiser state exists, so
-                         
-                         
-SAVE_RESERVE_MIN = 4     
-
-
-
 
 def _build(cls, **kw):
- 
+
     import inspect
     from dataclasses import fields, is_dataclass
 
@@ -93,132 +78,8 @@ def _build(cls, **kw):
     return cls(**{k: v for k, v in kw.items() if k in accepted})
 
 
-class TimeBudget:
-
-
-    @staticmethod
-    def make(minutes):
-        from transformers import TrainerCallback
-
-        class _Cb(TrainerCallback):
-            def on_train_begin(self, args, state, control, **kw):
-                self.t0 = time.time()
-                self.warned = False
-
-            def on_step_end(self, args, state, control, **kw):
-                spent = (time.time() - self.t0) / 60.0
-                if not self.warned and spent > minutes * 0.8:
-                    self.warned = True
-                    print("\n[budget] %.0f of %d min spent at step %d/%d"
-                          % (spent, minutes, state.global_step, state.max_steps))
-                if spent >= minutes:
-                    print("\n[budget] %d min reached at step %d/%d - stopping. "
-                          "The best checkpoint so far is still what gets saved."
-                          % (minutes, state.global_step, state.max_steps))
-                    control.should_training_stop = True
-
-        return _Cb()
-
-
-# ---------------------------------------------------------------------------
-# HOW LONG A STEP ACTUALLY TAKES
-# ---------------------------------------------------------------------------
-
-def _probe_step_seconds(trainer, accum):
-   
-    import statistics
-
-    import torch
-
-    model = trainer.model
-    device = next(model.parameters()).device
-    loader = iter(trainer.get_train_dataloader())
-
-    micro, toks = [], []
-    was_training = model.training
-    model.train()
-    try:
-        for _ in range(PROBE_MICRO):
-            batch = next(loader)
-            batch = {k: (v.to(device) if hasattr(v, "to") else v)
-                     for k, v in batch.items()}
-            ids = batch.get("input_ids")
-            if ids is not None:
-                toks.append(int(ids.numel()))
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            t0 = time.time()
-            (model(**batch).loss / accum).backward()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            micro.append(time.time() - t0)
-    finally:
-        model.zero_grad(set_to_none=True)
-        if not was_training:
-            model.eval()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # Median, not mean: one micro-batch colliding with a Windows compositor
-    # hitch should not resize the whole plan. The first few carry one-off
-    # kernel compilation and are dropped.
-    kept = micro[PROBE_SKIP:] or micro
-    per_step = statistics.median(kept) * accum * PROBE_MARGIN
-    mean_tok = (sum(toks) / len(toks) / trainer.args.per_device_train_batch_size
-                if toks else 625.0)
-    return per_step, mean_tok
-
-
-def _plan_steps(sec_per_step, mean_tok, batch, accum, ceiling, budget_mins,
-                spent_s, evals, eval_rows):
-    """Decide how many steps fit, and show the arithmetic that decided it."""
-    tok_per_s = (batch * accum * mean_tok) / sec_per_step
-    # Evaluation is forward-only: no backward, no activation recompute. Three
-    # times training throughput is the conservative end of that; over-charging
-    # for eval costs a few steps, under-charging overruns the budget.
-    eval_s = (evals * eval_rows * mean_tok) / (tok_per_s * 3.0)
-    left_s = budget_mins * 60 - spent_s - SAVE_RESERVE_MIN * 60
-    affordable = int((left_s - eval_s) // sec_per_step)
-    chosen = max(1, min(affordable, ceiling))
-
-    print("\n--- budget plan " + "-" * 47)
-    print("  measured        %.2f s/step  (%.0f tokens/s, %.0f tok/row)"
-          % (sec_per_step, tok_per_s, mean_tok))
-    print("  budget          %d min, %.1f already spent, %d held for saving"
-          % (budget_mins, spent_s / 60, SAVE_RESERVE_MIN))
-    print("  %d dev evals    ~%.1f min" % (evals, eval_s / 60))
-    print("  affordable      %d steps%s"
-          % (affordable, "" if affordable <= ceiling
-             else " (capped at %d = %d epoch(s))" % (ceiling, EPOCHS)))
-    print("  RUNNING         %d steps = %s examples = %.0f%% of an epoch"
-          % (chosen, format(chosen * batch * accum, ","),
-             100.0 * chosen / ceiling * EPOCHS))
-    print("  projected       %.0f min of stepping, %.0f min total"
-          % (chosen * sec_per_step / 60,
-             (spent_s + chosen * sec_per_step + eval_s) / 60 + SAVE_RESERVE_MIN))
-    print("-" * 62)
-
-    if affordable < 0.25 * ceiling:
-        print("\n  ** %.0f%% of an epoch is thin. The card is the bottleneck,"
-              % (100.0 * affordable / ceiling * EPOCHS))
-        print("     not the schedule. In order of effect:")
-        print("       1. run this on a free Kaggle/Colab T4 -- 16 GB, no")
-        print("          spilling, roughly 10x these numbers")
-        print("       2. --lora-attn-only          (24.3M -> 9.2M trained)")
-        print("       3. turn OFF 'CUDA - Sysmem Fallback Policy' for")
-        print("          python.exe in the NVIDIA Control Panel, so a config")
-        print("          that does not fit says so instead of quietly paging")
-        print("       4. close anything else holding VRAM; drive the display")
-        print("          from the iGPU\n")
-    return chosen
-
-
-# ---------------------------------------------------------------------------
-# TRAIN
-# ---------------------------------------------------------------------------
-
 def _verify_mask(trainer, tokenizer, verbose):
- 
+
     batch = trainer.data_collator([trainer.train_dataset[0]])
     labels = batch["labels"][0]
     ids = batch["input_ids"][0]
@@ -237,8 +98,6 @@ def _verify_mask(trainer, tokenizer, verbose):
     pct = 100.0 * len(kept) / total
     print("loss mask: %d of %d tokens supervised (%.0f%%)" % (len(kept), total, pct))
 
-    # The derivation targets are roughly half of each rendered example, so a
-    # mask covering nearly everything means the prompt is being trained on too.
     if pct > 90:
         sys.exit("MASK CHECK FAILED: %.0f%% of tokens are supervised. The "
                  "instruction marker did not match, so the model is being "
@@ -281,7 +140,7 @@ def write_run_meta(spec, steps, batch, accum, best_loss):
 
 
 def _check_fairness(spec, requested_steps):
-  
+
     other = "qwen" if spec["adapter"].endswith("llama") else "llama"
     other_dir = ROOT / "unsloth" / MODELS[other]["adapter"] / RUN_META
     if not other_dir.exists():
@@ -296,10 +155,9 @@ def _check_fairness(spec, requested_steps):
              meta["batch"], meta["accum"]))
     # 0 is the argparse default and means "not given", the same as None.
     if not requested_steps:
-        print("[fairness] This run has no --max-steps, so the probe will pick")
-        print("           its own length from the clock and the two models will")
-        print("           almost certainly differ. To compare pretraining "
-              "rather than speed:")
+        print("[fairness] This run has no --max-steps, so it runs a full epoch.")
+        print("           Keep --bs and --accum the same as that run, or pin")
+        print("           the length with:")
         print("               --max-steps %d\n" % meta["steps"])
     elif requested_steps != meta["steps"]:
         print("[fairness] --max-steps %d does not match. The comparison will "
@@ -309,12 +167,8 @@ def _check_fairness(spec, requested_steps):
         print("[fairness] matches - the two runs are comparable.\n")
 
 
-def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
-          max_steps, attn_only, dry_run, verify):
-    # The budget covers everything from here: loading the model, tokenising,
-    # probing, training, evaluating and saving. Starting the clock at
-    # trainer.train() would be measuring the wrong thing.
-    t_start = time.time()
+def train(spec, epochs, batch, accum, evals, eval_rows, max_steps, attn_only,
+          dry_run, verify):
     for path in (TRAIN_FILE, DEV_FILE):
         if not path.exists():
             sys.exit("missing %s - run `python crawl/build_sft.py` first"
@@ -326,10 +180,9 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
     print("adapter   %s" % adapter_dir.relative_to(ROOT))
     print("data      %s / %s" % (TRAIN_FILE.name, DEV_FILE.name))
     print("effective batch %d  (%d x %d accum)" % (batch * accum, batch, accum))
-    print("seq len   %d | LoRA r%d on %s" % (
+    print("seq len   %d | LoRA r%d on %s\n" % (
         MAX_SEQ_LEN, LORA_RANK,
         "q/k/v/o only" if attn_only else "all 7 projections"))
-    print("budget    %s\n" % ("%d min" % budget_mins if budget_mins else "none"))
     _check_fairness(spec, max_steps)
     if dry_run:
         print("--dry-run: no model loaded.")
@@ -372,10 +225,10 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
                            split="train").map(fmt, batched=True)
     full_dev = len(eval_ds)
     if eval_rows and eval_rows < full_dev:
-       
+
         eval_ds = eval_ds.shuffle(seed=SEED).select(range(eval_rows))
 
-    
+
     sample = train_ds[0]["text"]
     for name in ("instruction_part", "response_part"):
         if spec[name] not in sample:
@@ -390,7 +243,7 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
     run_dir = ROOT / "unsloth" / "training_runs" / spec["adapter"]
     ceiling = math.ceil(len(train_ds) / (batch * accum)) * epochs
 
-   
+
     cfg = dict(
         per_device_train_batch_size=batch,
         gradient_accumulation_steps=accum,
@@ -414,7 +267,7 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
         save_strategy="steps",
         save_steps=ceiling,
         save_total_limit=2,
-        
+
         save_only_model=True,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -436,45 +289,22 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
     )
     _verify_mask(trainer, tokenizer, verify)
 
- 
+
     if max_steps:
         max_steps = min(max_steps, ceiling)
-        print("--max-steps given: %d steps, no probe.\n" % max_steps)
-    elif not budget_mins:
-        max_steps = ceiling
-        print("no budget: the full %d epoch(s), %d steps.\n"
-              % (epochs, max_steps))
+        print("--max-steps given: %d steps.\n" % max_steps)
     else:
-        print("probing %d micro-batches to time this configuration...\n"
-              % PROBE_MICRO)
-        try:
-            sec, mean_tok = _probe_step_seconds(trainer, accum)
-            max_steps = _plan_steps(sec, mean_tok, batch, accum, ceiling,
-                                    budget_mins, time.time() - t_start,
-                                    evals, eval_rows)
-        except Exception as exc:                                # noqa: BLE001
-          
-            max_steps = min(ceiling, 300)
-            print("\n[probe] failed (%s: %s)" % (type(exc).__name__, exc))
-            print("[probe] falling back to %d steps; TimeBudget still caps "
-                  "the run at %d min.\n" % (max_steps, budget_mins))
-
+        max_steps = ceiling
+        print("the full %d epoch(s), %d steps.\n" % (epochs, max_steps))
 
     eval_every = min(max_steps, max(20, max_steps // max(1, evals)))
     trainer.args.max_steps = max_steps
     trainer.args.eval_steps = eval_every
     trainer.args.save_steps = eval_every
-   
-    if budget_mins:
-        trainer.add_callback(TimeBudget.make(budget_mins))
 
     stats = trainer.train()
 
-    # ---- what the dev set chose -----------------------------------------
     print("\nRuntime: %.1f min" % (stats.metrics["train_runtime"] / 60))
-    if trainer.state.global_step < trainer.state.max_steps:
-        print("Stopped at step %d of %d - the budget cut the run short."
-              % (trainer.state.global_step, trainer.state.max_steps))
 
     hist = [h for h in trainer.state.log_history if "eval_loss" in h]
     best_loss = None
@@ -488,26 +318,22 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
                                                     hist[-1].get("step")))
         print("BEST   eval_loss %.4f at step %s  <- checkpoint kept"
               % (best["eval_loss"], best.get("step")))
-        if best is hist[-1]:
-            print("(best is the last step: eval loss was still falling when the")
-            print(" budget ran out. Nothing overfitted; there was simply more")
-            print(" training left to do than the clock allowed.)")
     else:
         print("\nNo eval_loss recorded - check the [config] lines above.")
 
     adapter_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
-    # Stamp the skill into the adapter, so it can never be served a prompt it
-    # was not trained on.
+    # stamp the skill version so the adapter cannot be served a prompt it
+    # was not trained on
     skill.write_version(str(adapter_dir))
 
-   
+
     write_run_meta(spec, trainer.state.global_step, batch, accum, best_loss)
 
     print("\nAdapter saved to %s/ (skill %s)"
           % (adapter_dir.relative_to(ROOT), skill.SKILL_VERSION))
-    print("\nTrain the other family to the SAME step count, not the same clock:")
+    print("\nTrain the other family to the SAME step count:")
     print("    python train.py --model %s --max-steps %d"
           % ("qwen" if spec["adapter"].endswith("llama") else "llama",
              trainer.state.global_step))
@@ -516,7 +342,6 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description=__doc__.split("\n")[1],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True, choices=sorted(MODELS),
                    help="which family to fine-tune")
@@ -525,13 +350,11 @@ if __name__ == "__main__":
                    help="per-device batch (default %d)" % BATCH_SIZE)
     p.add_argument("--accum", type=int, default=ACCUM_STEPS,
                    help="gradient accumulation (default %d)" % ACCUM_STEPS)
-    p.add_argument("--budget-mins", type=int, default=BUDGET_MINS,
-                   help="wall-clock cap, 0 to disable (default %d)" % BUDGET_MINS)
     p.add_argument("--evals", type=int, default=EVALS,
                    help="dev evaluations spread across the run (default %d)"
                         % EVALS)
     p.add_argument("--max-steps", type=int, default=0,
-                   help="fix the run length and skip the probe")
+                   help="stop early instead of running the full epoch")
     p.add_argument("--verify", action="store_true",
                    help="check the loss mask on a real batch and exit "
                         "(~1 min, no training)")
@@ -543,6 +366,5 @@ if __name__ == "__main__":
     p.add_argument("--dry-run", action="store_true",
                    help="print the config and stop, no GPU needed")
     a = p.parse_args()
-    train(MODELS[a.model], a.epochs, a.budget_mins, a.bs, a.accum,
-          a.evals, a.eval_rows, a.max_steps, a.lora_attn_only, a.dry_run,
-          a.verify)
+    train(MODELS[a.model], a.epochs, a.bs, a.accum, a.evals, a.eval_rows,
+          a.max_steps, a.lora_attn_only, a.dry_run, a.verify)
