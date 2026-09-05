@@ -50,20 +50,20 @@ SLANG = {
     "cite": "cerita", "citer": "cerita", "crita": "cerita", "cerite": "cerita",
     "tgok": "tengok", "tengok": "tengok",
     "tq": "terima kasih",
-    "lg": "lagi",                # 4x
-    "kak": "kakak",              # 5x
-    "tpi": "tetapi",             # 4x
-    "kiteorg": "kami",           # 2x
-    "jd": "jadi",                # 2x
-    "betol": "betul",            # 2x
-    "tngok": "tengok",           # 2x
-    "tgn": "tangan",             # 1x
-    "xjadi": "tidak jadi",       # 1x
-    "xtau": "tidak tahu",        # 1x
-    "xbleh": "tidak boleh",      # 1x
-    "xley": "tidak boleh",       # 1x
-    "xske": "tidak suka",        # 1x
-    "xyh": "tidak payah",        # 1x - gold says "tak payah"; "tidak" wins
+    "lg": "lagi",                
+    "kak": "kakak",              
+    "tpi": "tetapi",             
+    "kiteorg": "kami",           
+    "jd": "jadi",                
+    "betol": "betul",            
+    "tngok": "tengok",           
+    "tgn": "tangan",             
+    "xjadi": "tidak jadi",       
+    "xtau": "tidak tahu",        
+    "xbleh": "tidak boleh",      
+    "xley": "tidak boleh",       
+    "xske": "tidak suka",        
+    "xyh": "tidak payah",       
 }          
 
 # Discourse particles - deliberately NOT normalised
@@ -250,15 +250,7 @@ def band(hits, oov=0):
 
 
 def keeps(hits, malay_hits, n_words, min_hits, oov=0):
-    """Keep a sentence if the dictionary struggles with it, or the lexicon
-    markers are piled high enough to say so on their own.
 
-    Chosen by measuring candidate rules against 150 hand-labelled sentences.
-    This one scored 82% precision / 67% recall, against 70/78 for a flat
-    `hits >= 2`. Precision is the one to buy: there are ~13k sentences
-    available and only ~3k are needed, so discarding good rows is cheap
-    while standard Malay leaking into the training set is not.
-    """
     if oov >= 2 or hits >= 4:
         return True
     # Short sentences have no room to accumulate markers, so let one OOV
@@ -366,10 +358,6 @@ def _write(kept):
 
 
 def _existing_labels():
-    """How many Y/N labels are already in the check workbook.
-
-    Hand labelling costs half an hour, so refuse to silently overwrite it.
-    """
     if not CHECK_XLSX.exists():
         return 0
     try:
@@ -410,13 +398,7 @@ def _write_check(kept, rejected):
 
 
 def _write_xlsx(sample):
-    """Same sample as an .xlsx, because .tsv does not open cleanly in Excel.
 
-    The filter verdict and hit count are written but hidden: seeing them
-    while labelling biases the annotator into agreeing with the filter,
-    which is exactly what this sample exists to test. score_filter.py
-    still reads them.
-    """
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font

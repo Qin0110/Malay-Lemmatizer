@@ -89,35 +89,6 @@ def norm(w):
     return re.sub(r"[^\w]", "", w.lower())
 
 
-def predict_copy(row, lex, roots):
-    return [e["t"] for e in row["lemmas"]]
-
-
-def predict_malindo(row, lex, roots):
-    out = []
-    for e in row["lemmas"]:
-        tok = e["t"]
-        lemma, _ = pick(lex.get(tok, []), tok)
-        out.append(lemma or tok)
-    return out
-
-
-def predict_malindo_root(row, lex, roots):
-    out = []
-    for e in row["lemmas"]:
-        tok = e["t"]
-        root = roots.get(tok)
-        if root:
-            out.append(root)
-        else:
-            lemma, _ = pick(lex.get(tok, []), tok)
-            out.append(lemma or tok)
-    return out
-
-
-def predict_rules(row, lex, roots):
-    return [propose(e["t"], lex, roots)[0] for e in row["lemmas"]]
-
 
 def _import_unsloth():
     shadow = {"", ".", str(ROOT)}
@@ -258,19 +229,6 @@ def align_lcs(pred_words, lemmas):
     return got
 
 
-def edit_distance(a, b):
-    if a == b:
-        return 0
-    prev = list(range(len(b) + 1))
-    for i, x in enumerate(a, 1):
-        cur = [i]
-        for j, y in enumerate(b, 1):
-            cur.append(min(prev[j] + 1,
-                           cur[j - 1] + 1,
-                           prev[j - 1] + (x != y)))
-        prev = cur
-    return prev[-1]
-
 
 def sequence_metrics(rows, preds, raw_texts=None):
     w_err = w_len = c_err = c_len = 0
@@ -292,16 +250,7 @@ def sequence_metrics(rows, preds, raw_texts=None):
             c_err / c_len if c_len else 0.0)
 
 
-def mcnemar(a, b):
-    from math import comb
-    n01 = sum(1 for x, y in zip(a, b) if x == 0 and y == 1)
-    n10 = sum(1 for x, y in zip(a, b) if x == 1 and y == 0)
-    n = n01 + n10
-    if n == 0:
-        return n01, n10, 1.0
-    k = min(n01, n10)
-    p = 2 * sum(comb(n, i) for i in range(k + 1)) / (2 ** n)
-    return n01, n10, min(p, 1.0)
+
 
 
 def score(rows, preds):

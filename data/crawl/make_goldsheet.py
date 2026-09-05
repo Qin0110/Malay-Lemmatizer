@@ -16,18 +16,15 @@ GOLD_SHEET = ROOT / "data" / "gold_sheet.xlsx"
 GOLD_JSONL = ROOT / "data" / "gold.jsonl"
 MALINDO_TSV = ROOT / "malindo_morph" / "malindo_dic_2024.tsv"
 
-# Order matters: Python alternation takes the FIRST match, so the
-# reduplication form must come first or "baik2" splits into "baik"+"2".
+
 WORD_RE = re.compile(r"[a-z]+\d|[a-z]+(?:-[a-z]+)*|\d+")
 ELONG_RE = re.compile(r"([a-z])\1{2,}")
 DOUBLE_RE = re.compile(r"([a-z])\1")
 REDUP_RE = re.compile(r"^([a-z]{3,})2$")
 
 
-# ---------------------------------------------------------------------------
 
 def malindo_lemmas():
-    """surface form (lower) -> list of distinct lemmas."""
     import pandas as pd
     df = pd.read_csv(MALINDO_TSV, sep="\t", header=None, usecols=[2, 9],
                      names=["surface", "lemma"], encoding="utf-8", dtype=str)
@@ -40,18 +37,6 @@ def malindo_lemmas():
 
 
 def malindo_roots():
-    """surface form (lower) -> morphological root.
-
-    MALINDO's `root` column is what a lemmatiser actually wants; the `lemma`
-    column often just echoes the surface form. Root handles circumfixes that
-    naive prefix-stripping cannot (keselamatan -> selamat, percakapan ->
-    cakap) and correctly leaves single-morpheme words that merely look
-    affixed (mereka, selalu, perempuan, kelakar) alone.
-
-    It is consulted only AFTER the slang lexicon, because MALINDO lists
-    informal spellings with themselves as root - going to it first would
-    turn "yg" -> "yang" back into "yg" -> "yg".
-    """
     import pandas as pd
     df = pd.read_csv(MALINDO_TSV, sep="\t", header=None, usecols=[1, 2],
                      names=["root", "surface"], encoding="utf-8", dtype=str)
@@ -293,10 +278,7 @@ def build():
     print("Everything else is very likely already correct - skim, do not retype.")
     print("\nFill `corrected_lemma` ONLY where `proposed_lemma` is wrong.")
     print("Leave it blank to accept the proposal.")
-    # Echo back the paths this run actually used. A --pool run that printed
-    # the bare default would send the annotator's finished work into the gold
-    # files, which is the one mistake this whole three-way split exists to
-    # prevent.
+
     if GOLD_POOL == ROOT / "data" / "gold_pool.jsonl":
         print("\nWhen done: python crawl/make_goldsheet.py --collect")
     else:

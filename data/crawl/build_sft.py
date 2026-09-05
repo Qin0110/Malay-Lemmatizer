@@ -1,41 +1,4 @@
 #!/usr/bin/env python
-"""
-Rebuild the fine-tuning targets from the silver annotations.
-
-    python crawl/build_sft.py                 # write train + dev ChatML
-    python crawl/build_sft.py --dry-run       # stats and a sample, write nothing
-    python crawl/build_sft.py --show 2        # print 2 rendered examples
-
-WHAT THIS REPLACES
-------------------
-unsloth/data/training_split.jsonl was written for the old skill, whose target
-was a bare lemma sentence:
-
-    aku siap ada playlist sembang seram kakak jem sebab memang minat gila
-
-The current skill asks for a derivation -- one line per token, each carrying
-the rule that produced its lemma, then the sentence. Training on the old file
-would produce a model that ignores the reasoning format entirely, which is the
-only thing that makes its answers auditable.
-
-WHERE THE TARGETS COME FROM
----------------------------
-Not from the old ChatML, which has no per-token information left in it. From
-data/silver.jsonl, which carries `{"t": token, "l": lemma, "src": rule}` for
-every token, through skill.render_target(). So the derivations are RENDERED
-from provenance the corpus already recorded, never invented -- if a target says
-IMBUHAN, it is because the pipeline actually applied an affix rule to that
-token.
-
-WHICH ROWS GO WHERE
--------------------
-data/split_manifest.json decides, not a fresh shuffle. Re-splitting here would
-silently move sentences between train and dev between runs, so a model trained
-today and one trained tomorrow would not be comparable, and a sentence could
-drift into the split it was meant to be held out from.
-
-The gold test set never appears. That is asserted, not assumed.
-"""
 
 import argparse
 import json

@@ -1,33 +1,5 @@
 #!/usr/bin/env python
-"""Re-derive the filtering cascade reported in Section 3.4, writing nothing.
 
-    python crawl/verify_filter.py
-
-WHY THIS EXISTS SEPARATELY FROM build_corpus.py
------------------------------------------------
-build_corpus.py prints the same cascade, but it also REWRITES
-data/corpus.jsonl, and that file must not be regenerated. Sentence ids are
-assigned by position as sentences are kept:
-
-    "id": "yt_%05d" % len(kept)
-
-so admitting even one extra sentence shifts every id after it. The corpus on
-disk was produced by an earlier run of the same pipeline, and re-running the
-current filter keeps 193 more sentences -- which would re-point 98.9% of ids at
-different text and detach 294 of the 300 hand-verified gold and validation
-labels from the sentences they describe.
-
-So the numbers have to be reproducible WITHOUT touching the corpus. This script
-replays the same five filters over the same raw comments, in the same order,
-using build_corpus's own functions, and only prints.
-
-WHAT IT PROVES
---------------
-  1. the cascade in the report is reproducible to the sentence
-  2. the corpus in use is a strict SUBSET of what those filters admit --
-     nothing in the experiment fails the published criteria
-  3. how far the corpus is from a rebuild, in ids
-"""
 
 import json
 import re
@@ -53,12 +25,7 @@ def jl(path):
 
 
 def replay():
-    """The five filters, in build_corpus's order. Returns (kept, drop counts).
 
-    Deliberately a copy of the loop rather than a call into build(), because
-    build() writes. If build_corpus's filtering changes, this will disagree
-    with it -- which is a result worth seeing, not a bug to paper over.
-    """
     raw = jl(RAW)
     kept, seen, drop = [], set(), Counter()
 

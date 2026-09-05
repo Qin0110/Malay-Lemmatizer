@@ -1,71 +1,5 @@
 #!/usr/bin/env python
-"""
-Fine-tune a lemmatiser. Same data, same skill, two model families.
 
-    python train.py --model llama            # Llama 3.2 3B  -> lemmatizer_lora_llama
-    python train.py --model qwen             # Qwen 2.5 3B   -> lemmatizer_lora_qwen
-    python train.py --model llama --budget-mins 120     # fit the run to 2 hours
-    python train.py --model llama --max-steps 600       # fix the length, skip the probe
-    python train.py --model llama --lora-attn-only      # cheapest config, if it still won't fit
-    python train.py --model llama --dry-run             # config check, no GPU
-
-WHAT IS BEING COMPARED
-----------------------
-Two ~3B instruction-tuned models, fine-tuned on identical data with identical
-hyperparameters, so the only variable is the pretraining. Everything that
-could confound that -- the prompt, the targets, the split, the LoRA rank, the
-seed -- is held fixed here rather than passed in, and the two runs differ only
-in --model.
-
-THE ONE THING THAT MUST DIFFER PER FAMILY
------------------------------------------
-`train_on_responses_only` masks the loss so the model is trained to produce
-the ANSWER, not to reproduce the prompt. It finds the answer by string-matching
-the chat template's turn markers, and those markers are different for every
-family:
-
-    Llama 3.2   <|start_header_id|>assistant<|end_header_id|>\\n\\n
-    Qwen 2.5    <|im_start|>assistant\\n
-
-Get this wrong and nothing raises. The markers simply never match, the mask is
-never applied, and the model trains on the system prompt and user turn as
-though they were the answer -- which produces a model that recites the
-instructions back at you. So the markers live in MODELS beside the template
-that generates them, and are asserted against the tokenised text before
-training starts.
-
-SEQUENCE LENGTH AND BATCH SIZE
-------------------------------
-The reasoning targets are long. Measured with the Llama tokeniser over all
-7,200 training rows: 625 tokens at the mean, 761 at p90, 866 at p99, 950 at
-the maximum. Batch sizes tuned for the old ~80-token format will run out of
-memory here. MAX_SEQ_LEN is 896 because that truncates 20 rows of 7,200
-(0.28%) while 768 would truncate 633 of them (8.8%) -- and a truncated
-target is not a shorter lesson, it is a lesson in stopping early.
-
-Effective batch is BATCH_SIZE x ACCUM_STEPS. Splitting it as 1 x N rather
-than 2 x N/2 is identical maths at half the peak activation memory, so the
-per-device batch stays at 1. The size of N is a different question, and on a
-wall-clock budget it is not free -- see ACCUM_STEPS.
-
-FITTING A WALL-CLOCK BUDGET
----------------------------
-On a 4 GB card step time is not predictable from the configuration. Either
-the working set fits in VRAM or it spills into host memory over PCIe, and
-that is a cliff rather than a slope -- the same config can run at 8 s/step
-or at 24 s/step. So the run does not guess. It trains PROBE_STEPS throwaway
-steps, measures them, and sets `max_steps` from the measurement before the
-optimiser and the LR schedule are built.
-
-That last part is the point. Letting a wall-clock callback stop a run early
-does bound the time, but it leaves the linear decay half-finished: a run
-scheduled over 1,800 steps and killed at 450 never drops below 75% of peak
-LR, so the model never gets the low-LR phase that consolidates what it
-learned. Deciding the length up front and annealing over exactly that many
-steps is what makes a short run a proper short run rather than a truncated
-long one. The TimeBudget callback stays on underneath as a backstop, but if
-the probe did its job it should never fire.
-"""
 
 import argparse
 import json
@@ -75,11 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-# Set before anything imports torch. A 4 GB card doing 4-bit LoRA spends the
-# whole run near its ceiling, where the default caching allocator fragments
-# and then spills into host memory; expandable segments let it grow a block
-# instead of failing over to a slow one. Harmless on a card with room to
-# spare, so it is unconditional rather than a flag.
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 ROOT = Path(__file__).resolve().parent
@@ -90,13 +20,7 @@ import skill                                                   # noqa: E402
 TRAIN_FILE = ROOT / "unsloth" / "data" / "train_reasoning.jsonl"
 DEV_FILE = ROOT / "unsloth" / "data" / "dev_reasoning.jsonl"
 
-# ---------------------------------------------------------------------------
-# THE TWO MODELS
-# ---------------------------------------------------------------------------
-#
-# Matched on size, instruction-tuning and quantisation so the comparison is
-# about pretraining. The response markers are the family-specific part; see
-# the module docstring for why getting them wrong fails silently.
+
 
 MODELS = {
     "llama": {
@@ -115,82 +39,38 @@ MODELS = {
     },
 }
 
-# ---------------------------------------------------------------------------
-# HYPERPARAMETERS  -- identical for both runs, on purpose
-# ---------------------------------------------------------------------------
+
 
 SEED = 3407
-MAX_SEQ_LEN = 896        # p100 is 950 tokens; 896 truncates 20 rows of 7,200
-EPOCHS = 1               # the ceiling, not a promise -- the probe decides how
-                         # much of it the budget actually buys. Was 2, when a
-                         # target was ~80 tokens and an epoch was cheap; at 625
-                         # tokens per row an epoch is 4.5M tokens and one pass
-                         # is already 8x the signal the old epoch 2 carried.
-BATCH_SIZE = 1           # 1 x N and 2 x N/2 are the same optimisation; 1 x N
-                         # halves peak activation memory, so the per-device
-                         # batch stays at 1 and the accumulation does the work.
-# Accumulation is NOT free when the budget is wall-clock rather than epochs.
-# Throughput is fixed by the card (measured: ~1.1 TFLOPS, 13-16% MFU on this
-# 3050 -- normal for 4-bit weights on 4 GB, not a misconfiguration), so a
-# 2-hour run processes the same number of TOKENS whatever the accumulation is.
-# What accumulation changes is how many OPTIMISER UPDATES those tokens buy:
-#
-#     accum 8    ~35 steps x 8 examples = 280 examples,  35 updates
-#     accum 4    ~70 steps x 4 examples = 280 examples,  70 updates
-#
-# Same data, twice the gradient descent. In the compute-limited regime this
-# run is in -- 4% of one epoch, eval loss still falling steeply -- more
-# updates on the same tokens is strictly the better trade. Dropped to 4 rather
-# than 2 because effective batch 2 makes the gradient noisy enough to need the
-# learning rate lowered with it, which is a second change and a second thing
-# to be wrong about.
+MAX_SEQ_LEN = 896        
+EPOCHS = 1               
+                 
+BATCH_SIZE = 1           
+                         
 ACCUM_STEPS = 4
-BUDGET_MINS = 120        # hard wall-clock cap; 0 disables (and skips the probe)
-EVALS = 5                # dev evaluations across the run, however long it ends
-                         # up being. A count rather than a step interval,
-                         # because the step count is not known until the probe
-                         # has run -- `eval_every 100` on a 250-step run is two
-                         # checkpoints to choose between, which is not a choice.
-# Dev rows used IN THE LOOP. Not the whole 800: those forward passes cost real
-# minutes out of the budget and change no weights -- they only rank
-# checkpoints, which 96 rows do about as well. The full dev set is still there
-# for offline scoring afterwards.
+BUDGET_MINS = 120        
+EVALS = 5               
+                      
 EVAL_ROWS = 64
 LORA_RANK = 16
 LEARNING_RATE = 2e-4
 
-# LoRA placement. All seven projections is the better adapter and the default.
-# Attention-only drops trainable parameters from 24.3M to 9.2M, which matters
-# here for a reason that is not the arithmetic: Unsloth offloads gradients to
-# host memory when VRAM is tight, so 15M fewer parameters is 15M fewer
-# gradients crossing the PCIe bus every step. It is the lever to pull if the
-# probe says the budget does not fit, and the quality cost is real.
+
 ATTN_ONLY = ["q_proj", "k_proj", "v_proj", "o_proj"]
 ALL_LINEAR = ATTN_ONLY + ["gate_proj", "up_proj", "down_proj"]
 
-# Probe and budget accounting.
 PROBE_MICRO = 10         # micro-batches timed; a step is ACCUM_STEPS of them
 PROBE_SKIP = 3           # first ones carry one-off kernel compilation
 PROBE_MARGIN = 1.15      # the probe runs before the optimiser state exists, so
-                         # it sees a roomier card than training will. Charge
-                         # 15% for that rather than plan to the optimistic end.
-SAVE_RESERVE_MIN = 4     # held back for the final save and best-model reload
+                         
+                         
+SAVE_RESERVE_MIN = 4     
 
 
-# ---------------------------------------------------------------------------
-# VERSION-TOLERANT CONSTRUCTION
-# ---------------------------------------------------------------------------
+
 
 def _build(cls, **kw):
-    """Construct `cls` with only the keyword arguments it actually accepts.
-
-    TRL and transformers have renamed things underneath this project:
-    `evaluation_strategy` became `eval_strategy`, and SFTTrainer's `tokenizer`
-    became `processing_class`. Rather than pin versions, ask the class what it
-    takes. Anything dropped is PRINTED, never silently discarded -- a silently
-    ignored eval_strategy is exactly how you end up believing you have
-    validation when you do not.
-    """
+ 
     import inspect
     from dataclasses import fields, is_dataclass
 
@@ -214,15 +94,7 @@ def _build(cls, **kw):
 
 
 class TimeBudget:
-    """Stop training once a wall-clock budget is spent.
 
-    Subclassed at call time rather than import time, so this module still
-    imports on a machine with no GPU stack.
-
-    Stopping early is safe: save_steps == eval_steps and load_best_model_at_end
-    is on, so whatever the budget cuts short, the adapter saved is still the
-    best checkpoint the dev set saw, not the last one.
-    """
 
     @staticmethod
     def make(minutes):
@@ -253,24 +125,7 @@ class TimeBudget:
 # ---------------------------------------------------------------------------
 
 def _probe_step_seconds(trainer, accum):
-    """Time forward+backward on real batches. Returns (seconds_per_step, mean_tokens).
-
-    Measured on the trainer that will actually run, using its own dataloader
-    and its own collator, so what is timed is what will happen. Gradients are
-    accumulated exactly as a step would accumulate them and then dropped, so
-    the weights never move and no snapshot is needed.
-
-    An earlier version built a second, throwaway SFTTrainer for this. On a 4 GB
-    card that does not survive: the first trainer's allocations are not fully
-    reclaimable, and constructing the second one runs out of memory before it
-    reaches a single step. One trainer, timed in place, is both cheaper and the
-    only thing that fits.
-
-    What this measures is speed, not whether the run fits. The optimiser state
-    does not exist yet at probe time, so peak memory here is lower than during
-    training -- a configuration that probes cleanly can still die later. That
-    is what PROBE_MARGIN and the TimeBudget backstop are for.
-    """
+   
     import statistics
 
     import torch
@@ -363,19 +218,7 @@ def _plan_steps(sec_per_step, mean_tok, batch, accum, ceiling, budget_mins,
 # ---------------------------------------------------------------------------
 
 def _verify_mask(trainer, tokenizer, verbose):
-    """Confirm the loss mask covers the ANSWER and nothing else.
-
-    The marker check earlier only proves the strings appear in the rendered
-    text. It does not prove the mask landed on the right tokens, and that is
-    the failure worth catching: if the mask is wrong the run still trains,
-    still reports a falling loss, and produces a model that recites the system
-    prompt back at you -- two hours to find out.
-
-    So the labels are read back from a real collated batch. Tokens the model
-    is trained to produce have a label; everything else is -100. Two things
-    have to hold: some tokens are supervised, and the supervised span begins
-    inside the assistant turn rather than in the system prompt.
-    """
+ 
     batch = trainer.data_collator([trainer.train_dataset[0]])
     labels = batch["labels"][0]
     ids = batch["input_ids"][0]
@@ -438,15 +281,7 @@ def write_run_meta(spec, steps, batch, accum, best_loss):
 
 
 def _check_fairness(spec, requested_steps):
-    """Warn if the other family was trained on a different schedule.
-
-    The comparison this project exists to make is between two PRETRAININGS.
-    Every other variable has to be held equal, and the one this script can
-    silently vary is the step count, because the probe derives it from wall
-    clock and the two families do not run at the same speed. So the previous
-    run is read back and the mismatch is reported here rather than discovered
-    in the results table.
-    """
+  
     other = "qwen" if spec["adapter"].endswith("llama") else "llama"
     other_dir = ROOT / "unsloth" / MODELS[other]["adapter"] / RUN_META
     if not other_dir.exists():
@@ -537,13 +372,10 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
                            split="train").map(fmt, batched=True)
     full_dev = len(eval_ds)
     if eval_rows and eval_rows < full_dev:
-        # Deterministic subsample: the same rows every run, so two models are
-        # ranked against the same dev slice and their eval_loss curves are
-        # comparable. A fresh random subset per run would make them not be.
+       
         eval_ds = eval_ds.shuffle(seed=SEED).select(range(eval_rows))
 
-    # The assertion the docstring promises. A marker that does not appear in
-    # the rendered text means the loss mask will silently not be applied.
+    
     sample = train_ds[0]["text"]
     for name in ("instruction_part", "response_part"):
         if spec[name] not in sample:
@@ -558,12 +390,7 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
     run_dir = ROOT / "unsloth" / "training_runs" / spec["adapter"]
     ceiling = math.ceil(len(train_ds) / (batch * accum)) * epochs
 
-    # max_steps, eval_steps and save_steps below are provisional. The probe
-    # runs on this trainer once it exists and narrows all three before train()
-    # is called, which is early enough: transformers reads them at the top of
-    # the training loop and builds the LR schedule from max_steps there.
-    # warmup_steps stays 0 so warmup_ratio derives from whatever the probe
-    # settles on.
+   
     cfg = dict(
         per_device_train_batch_size=batch,
         gradient_accumulation_steps=accum,
@@ -587,9 +414,7 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
         save_strategy="steps",
         save_steps=ceiling,
         save_total_limit=2,
-        # Weights only. Optimiser state is twice the size of the adapter and
-        # would be written at every eval for a resume this script never does;
-        # load_best_model_at_end only ever reads the weights back.
+        
         save_only_model=True,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -611,11 +436,7 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
     )
     _verify_mask(trainer, tokenizer, verify)
 
-    # ---- how long the run gets ------------------------------------------
-    # After the collator is wrapped, so the probe times the real batches, and
-    # before train(), so the LR schedule spans exactly the steps that run. A
-    # schedule laid out over more steps than the run takes is a schedule that
-    # never anneals -- the failure this whole arrangement exists to avoid.
+ 
     if max_steps:
         max_steps = min(max_steps, ceiling)
         print("--max-steps given: %d steps, no probe.\n" % max_steps)
@@ -632,25 +453,18 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
                                     budget_mins, time.time() - t_start,
                                     evals, eval_rows)
         except Exception as exc:                                # noqa: BLE001
-            # A failed probe must not cost the run. Fall back to a length short
-            # enough to finish on the slowest thing measured here, and let
-            # TimeBudget backstop it.
+          
             max_steps = min(ceiling, 300)
             print("\n[probe] failed (%s: %s)" % (type(exc).__name__, exc))
             print("[probe] falling back to %d steps; TimeBudget still caps "
                   "the run at %d min.\n" % (max_steps, budget_mins))
 
-    # An interval derived from the length, so the number of checkpoints to
-    # choose between does not depend on how fast the card turned out to be.
-    # Clamped to max_steps at the top: if no evaluation ever lands there is no
-    # checkpoint, and load_best_model_at_end has nothing to load. Floored at 20
-    # at the bottom: below that the evals inform less than they cost.
+
     eval_every = min(max_steps, max(20, max_steps // max(1, evals)))
     trainer.args.max_steps = max_steps
     trainer.args.eval_steps = eval_every
     trainer.args.save_steps = eval_every
-    # After train_on_responses_only, not before: it is documented to return
-    # the trainer it was given, but attaching afterwards holds either way.
+   
     if budget_mins:
         trainer.add_callback(TimeBudget.make(budget_mins))
 
@@ -688,12 +502,7 @@ def train(spec, epochs, budget_mins, batch, accum, evals, eval_rows,
     # was not trained on.
     skill.write_version(str(adapter_dir))
 
-    # Record what this run actually did, so the other family can be trained to
-    # match it. The probe sets max_steps from WALL CLOCK, and the two families
-    # do not run at the same speed -- left alone, that hands one model more
-    # steps than the other and the comparison then measures which model is
-    # faster on this card rather than which pretraining suits Malay. See
-    # _check_fairness().
+   
     write_run_meta(spec, trainer.state.global_step, batch, accum, best_loss)
 
     print("\nAdapter saved to %s/ (skill %s)"

@@ -1,51 +1,4 @@
 #!/usr/bin/env python
-"""
-The lemmatiser's SKILL: what the model is told, what it must avoid, and the
-shape of the answer it has to produce.
-
-    python skill.py --card                 # print the system prompt
-    python skill.py --rules                # the rule vocabulary, with glosses
-    python skill.py --parse response.txt   # parse a model answer
-    python skill.py --demo                 # render corpus rows into targets
-    python skill.py --demo --seed data/gold.jsonl -n 3
-
-WHY THIS FILE EXISTS
---------------------
-A lemmatiser that answers with a bare sentence is unauditable. When it returns
-"jalan" for "berjalan" there is no way to tell whether it stripped a prefix,
-hit a dictionary entry, or guessed -- and those three failures need three
-different fixes. This skill makes the model show its derivation, one line per
-token.
-
-The reasoning is NOT free text. Each line carries a tag from the closed
-vocabulary in RULES, naming the rule that produced the lemma. That matters for
-three reasons:
-
-  1. It is gradeable. A tag can be scored against the `src` field the corpus
-     already carries on every token. Free-form prose cannot.
-  2. It is cheap. A 3B model asked to write explanations writes fluent wrong
-     ones; asked to pick one of nine tags, it mostly picks right.
-  3. It is already labelled. The corpus records which rule produced each
-     silver lemma, so training targets are RENDERED from provenance the data
-     already has, rather than invented after the fact.
-
-The prose a human reads is generated at DISPLAY time from the tag (see
-explain()). The model never writes prose, so it can never write prose that
-contradicts what it actually did.
-
-THE PROMPT IS PART OF THE MODEL
--------------------------------
-SYSTEM_PROMPT must be byte-identical between training and inference. A model
-fine-tuned on one prompt and served another still answers fluently -- it just
-answers in the wrong format, and the accuracy drops for a reason that has
-nothing to do with the weights. That failure is silent, which is why every
-component imports the prompt from here instead of keeping its own copy. Do not
-edit a version in place: add a new one, and stamp the adapters that use it.
-
-Stdlib-only on purpose: this has to stay inspectable and testable without
-torch, unsloth or a GPU, so the skill can be reviewed before any training run.
-"""
-
 import argparse
 import json
 import os
@@ -54,8 +7,6 @@ import sys
 
 SKILL_VERSION = "v1-reasoning"
 
-# Written into an adapter folder at save time so the adapter describes itself,
-# and a copied or renamed folder still knows which prompt it needs.
 SKILL_FILE = "skill.json"
 
 
@@ -79,7 +30,6 @@ RULES = {
     "KEKAL":    "tidak dikenali, dikekalkan seadanya",
 }
 
-# English gloss, for the report and for readers who do not read Malay.
 RULES_EN = {
     "KAMUS":    "already a root; unchanged",
     "RINGKAS":  "abbreviation or slang, expanded",
@@ -92,73 +42,27 @@ RULES_EN = {
     "KEKAL":    "unrecognised, left alone",
 }
 
-# Corpus `src` value -> (rule tag, uncertain).
-#
-# The second element is the uncertainty marker. It is not a separate rule: it
-# is the SAME rule applied with less evidence, which is exactly what the "?"
-# suffix means in the model's answer. Mapping an under-evidenced label to a
-# confident tag would teach the model to be confident about guesses.
-#
-# Every `src` the corpus can emit is listed. A tag that silently degrades to
-# KEKAL is worse than no tag at all -- it teaches the model to shrug.
+
 SRC_TO_RULE = {
-    "dict":       ("KAMUS",    False),   # MALINDO resolved it cleanly
-    # A derived noun that IS its own dictionary headword: pengangkutan,
-    # kecantikan, bacaan. Malay affixation is mostly derivational, so these
-    # are separate lexemes, not forms of their root -- reducing them to
-    # `angkut`/`cantik`/`baca` would be stemming, not lemmatisation. KAMUS
-    # rather than IMBUHAN precisely because no affix should come off.
+    "dict":       ("KAMUS",    False),  
     "deriv":      ("KAMUS",    False),
-    "slang":      ("RINGKAS",  False),   # from the SLANG lexicon
-    "particle":   ("PARTIKEL", False),   # kept as-is on purpose
-    "num":        ("NOMBOR",   False),   # a bare number, left alone
-    "redup":      ("GANDA",    False),   # budak2 -> budak
-    "elong":      ("PANJANG",  False),   # gilaaa -> gila
-    # An English word, detected by a Hunspell en_US lookup. This is the tag
-    # that makes the set a ROJAK lemmatiser rather than a Malay one, and it is
-    # only emitted when pyenchant is installed -- without it, code-switched
-    # words fall to `oov` and the model never learns INGGERIS at all. Install
-    # pyenchant before pre-filling any sheet.
+    "slang":      ("RINGKAS",  False), 
+    "particle":   ("PARTIKEL", False),  
+    "num":        ("NOMBOR",   False),   
+    "redup":      ("GANDA",    False),   
+    "elong":      ("PANJANG",  False),  
     "codeswitch": ("INGGERIS", False),
-    "affix":      ("IMBUHAN",  True),    # MALINDO root column; needs checking
-    # MALINDO offered several lemmas and one was picked. A real dictionary
-    # lemma, but the choice between candidates is the part that needs a human.
+    "affix":      ("IMBUHAN",  True),    
+
     "ambiguous":  ("KAMUS",    True),
-    # MALINDO echoed an informal spelling back at us. Tagging that KAMUS would
-    # teach the model that informal spellings are roots, so it is KEKAL --
-    # kept, not resolved.
+   
     "dict_check": ("KEKAL",    True),
-    "oov":        ("KEKAL",    True),    # nothing resolved it
+    "oov":        ("KEKAL",    True),   
     "unknown":    ("KEKAL",    True),
 }
 
-# "human" is not a rule. When an annotator corrects a lemma the original rule
-# is overwritten, so WHICH rule fired is gone -- while the lemma itself became
-# the most trustworthy label in the project. Dumping those tokens into KEKAL
-# would throw away the best data we have, so rule_for() re-derives the rule
-# from the surface pair instead. See infer_rule().
 HUMAN_SRC = "human"
 
-
-# ---------------------------------------------------------------------------
-# THE SKILL
-# ---------------------------------------------------------------------------
-#
-# Every "JANGAN" below is a failure this pipeline actually produces, not a
-# generic caution:
-#
-#   - translating to English is the base model's default reading of "convert
-#     this Malay sentence"
-#   - answering the question is what any interrogative input triggers: given
-#     "kenapa mahal sangat?" an instruct model explains inflation
-#   - one line per token is load-bearing: scoring aligns the answer against
-#     the input token list positionally, and a row whose token count drifted
-#     scores zero on every token, not just the drifted one
-#   - particles are a deliberate do-not-normalise set; "la" is not "lah" is
-#     not an error to fix
-#   - "dengan" -> "gan" and "makan" -> "kan" are what a naive affix stripper
-#     does to roots that merely start with a prefix-shaped string
-#   - splitting "budak2" into "budak budak" breaks the alignment AND the label
 
 SYSTEM_PROMPT = """\
 Anda pelemma bahasa Melayu rojak. Untuk setiap token, beri lema dan sebabnya.
@@ -192,23 +96,14 @@ JANGAN:
 - jangan tulis apa-apa di luar <lema> dan <ayat>"""
 
 
-# ---------------------------------------------------------------------------
-# WHICH SKILL DOES THIS ADAPTER SPEAK?
-# ---------------------------------------------------------------------------
+
 
 PROMPTS = {"v1-reasoning": SYSTEM_PROMPT}
 DEFAULT_VERSION = SKILL_VERSION
 
 
 def version_for(adapter_dir):
-    """Which skill version an adapter expects.
 
-    Read from <adapter>/skill.json, stamped at save time. An unstamped adapter
-    falls back to the current version WITH A WARNING, because guessing wrong
-    here produces the failure that is hardest to notice: the model still
-    answers fluently, the answer is just the wrong format, and the score comes
-    out low for a reason that has nothing to do with the model.
-    """
     meta = os.path.join(str(adapter_dir), SKILL_FILE)
     if os.path.exists(meta):
         try:
@@ -225,18 +120,12 @@ def version_for(adapter_dir):
 
 
 def prompt_for(adapter_dir):
-    """(system prompt, version) for an adapter.
-
-    The only supported way to get a system prompt at inference time. Anything
-    that keeps its own copy will eventually be served against a model trained
-    on a different one.
-    """
+ 
     v = version_for(adapter_dir)
     return PROMPTS[v], v
 
 
 def write_version(adapter_dir, version=SKILL_VERSION):
-    """Stamp a freshly saved adapter with the skill version it was trained on."""
     if version not in PROMPTS:
         raise ValueError("unknown skill version %r" % (version,))
     path = os.path.join(str(adapter_dir), SKILL_FILE)
@@ -246,23 +135,14 @@ def write_version(adapter_dir, version=SKILL_VERSION):
     return path
 
 
-# ---------------------------------------------------------------------------
-# RENDER: corpus annotations -> training target
-# ---------------------------------------------------------------------------
+
 
 _REDUP_RE = re.compile(r"^(.+?)2$")
 _ELONG_RE = re.compile(r"(.)\1{1,}")
 
 
 def infer_rule(token, lemma):
-    """Re-derive the rule from a token/lemma pair, for labels that lost theirs.
 
-    Only used where an annotator's correction overwrote the rule. Surface
-    evidence recovers the mechanical cases exactly; anything left is a change
-    a person made for a reason the two strings do not show, so it comes back
-    as RINGKAS with the uncertainty marker set -- the lemma is trustworthy,
-    the rule label is a guess, and the "?" says so.
-    """
     t, l = token.lower(), lemma.lower()
     if t == l:
         return ("KAMUS", False)
@@ -286,17 +166,7 @@ def rule_for(src, token=None, lemma=None):
 
 
 def render_target(row):
-    """A corpus row -> the exact string the model is trained to produce.
-
-    Takes a row in the corpus schema:
-        {"tokens": [...], "lemmas": [{"t": ..., "l": ..., "src": ...}, ...],
-         "lemma_text": "..."}
-
-    The lemma sentence is rebuilt from the per-token lemmas rather than copied
-    from `lemma_text`, so the <ayat> block can never disagree with the <lema>
-    block above it. A model trained on targets that contradict themselves
-    learns to contradict itself.
-    """
+    
     lines, words = [], []
     for e in row["lemmas"]:
         tag, uncertain = rule_for(e["src"], e["t"], e["l"])
@@ -326,22 +196,7 @@ LINE_RE = re.compile(r"^\s*(\S+)\s*\|\s*([A-Za-z]+)(\??)\s*\|\s*(.+?)\s*$")
 
 
 def parse_response(text):
-    """Parse a model answer into {"steps": [...], "sentence": str, "ok": bool}.
-
-    Each step is {"token", "rule", "uncertain", "lemma"}.
-
-    Deliberately forgiving about everything except the parts that carry
-    meaning. A base model with no fine-tuning will produce prose, markdown
-    fences, missing tags and invented rule names, and the evaluation needs a
-    number for how often that happens rather than an exception. `ok` is False
-    when the answer did not arrive in the required shape at all -- that is the
-    format-failure rate, and for an un-fine-tuned baseline it is a headline
-    result, not an error to suppress.
-
-    An unrecognised rule name is kept in the step but flagged uncertain: the
-    lemma may still be right, and throwing the line away would hide a correct
-    answer behind a formatting mistake.
-    """
+   
     block = LEMA_BLOCK_RE.search(text)
     body = block.group(1) if block else text
 
@@ -371,13 +226,7 @@ def _collapse_ws(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-# ---------------------------------------------------------------------------
-# EXPLAIN: tag -> the prose a human reads
-# ---------------------------------------------------------------------------
-#
-# Generated here, never by the model. The model picks a tag; this turns the
-# tag into a sentence. That separation is what makes the explanation
-# trustworthy: it cannot drift from the operation that was actually performed.
+
 
 TAGS_EN = {
     "KAMUS":    "dictionary",
@@ -402,12 +251,7 @@ def explain(rule, uncertain=False, lang="ms"):
 
 
 def format_result(parsed, lang="ms"):
-    """Render a parsed answer as the final user-facing output.
-
-    This is the last stage of the architecture: input -> preprocess -> model
-    -> here. It shows the lemma sentence first, because that is what was
-    asked for, then the derivation, because that is what makes it checkable.
-    """
+  
     tags = TAGS_EN if lang == "en" else None
     out = [parsed["sentence"], ""]
     width = max((len(s["token"]) for s in parsed["steps"]), default=0)
