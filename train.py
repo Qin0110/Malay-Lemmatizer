@@ -1,5 +1,13 @@
 #!/usr/bin/env python
+"""Fine-tune Llama 3.2 3B or Qwen2.5 3B with QLoRA on data/sft/.
 
+    python train.py --model llama --dry-run     show the settings, no GPU
+    python train.py --model llama --verify      check the loss mask and stop
+    python train.py --model llama               one epoch -> models/lemmatizer_lora_llama/
+    python train.py --model qwen --max-steps N
+
+Out of memory? Try --bs 1 --accum 4.
+"""
 
 import argparse
 import json
@@ -16,8 +24,9 @@ sys.path.insert(0, str(ROOT))
 
 import skill                                                   # noqa: E402
 
-TRAIN_FILE = ROOT / "unsloth" / "data" / "train_reasoning.jsonl"
-DEV_FILE = ROOT / "unsloth" / "data" / "dev_reasoning.jsonl"
+MODELS_DIR = ROOT / "models"
+TRAIN_FILE = ROOT / "data" / "sft" / "train.jsonl"
+DEV_FILE = ROOT / "data" / "sft" / "dev.jsonl"
 
 
 MODELS = {
@@ -39,7 +48,7 @@ MODELS = {
 
 
 SEED = 3407
-MAX_SEQ_LEN = 896
+MAX_SEQ_LEN = 1024
 EPOCHS = 1
 
 BATCH_SIZE = 4
@@ -55,7 +64,6 @@ ALL_LINEAR = ATTN_ONLY + ["gate_proj", "up_proj", "down_proj"]
 
 
 def _build(cls, **kw):
-
     import inspect
     from dataclasses import fields, is_dataclass
 
@@ -79,7 +87,6 @@ def _build(cls, **kw):
 
 
 def _verify_mask(trainer, tokenizer, verbose):
-
     batch = trainer.data_collator([trainer.train_dataset[0]])
     labels = batch["labels"][0]
     ids = batch["input_ids"][0]
@@ -125,7 +132,7 @@ RUN_META = "run_meta.json"
 
 def write_run_meta(spec, steps, batch, accum, best_loss):
     """Record the schedule this run actually got, beside the adapter."""
-    path = ROOT / "unsloth" / spec["adapter"] / RUN_META
+    path = MODELS_DIR / spec["adapter"] / RUN_META
     path.write_text(json.dumps({
         "base": spec["base"],
         "steps": steps,
@@ -140,9 +147,8 @@ def write_run_meta(spec, steps, batch, accum, best_loss):
 
 
 def _check_fairness(spec, requested_steps):
-
     other = "qwen" if spec["adapter"].endswith("llama") else "llama"
-    other_dir = ROOT / "unsloth" / MODELS[other]["adapter"] / RUN_META
+    other_dir = MODELS_DIR / MODELS[other]["adapter"] / RUN_META
     if not other_dir.exists():
         return
     try:
@@ -174,7 +180,7 @@ def train(spec, epochs, batch, accum, evals, eval_rows, max_steps, attn_only,
             sys.exit("missing %s - run `python crawl/build_sft.py` first"
                      % path.relative_to(ROOT))
 
-    adapter_dir = ROOT / "unsloth" / spec["adapter"]
+    adapter_dir = MODELS_DIR / spec["adapter"]
     print("base      %s" % spec["base"])
     print("template  %s" % spec["template"])
     print("adapter   %s" % adapter_dir.relative_to(ROOT))
@@ -240,7 +246,7 @@ def train(spec, epochs, batch, accum, evals, eval_rows, max_steps, attn_only,
     print("loss-mask markers found in the rendered text  PASS")
     print("train %d rows | dev %d rows\n" % (len(train_ds), len(eval_ds)))
 
-    run_dir = ROOT / "unsloth" / "training_runs" / spec["adapter"]
+    run_dir = MODELS_DIR / "training_runs" / spec["adapter"]
     ceiling = math.ceil(len(train_ds) / (batch * accum)) * epochs
 
 
@@ -337,7 +343,7 @@ def train(spec, epochs, batch, accum, evals, eval_rows, max_steps, attn_only,
     print("    python train.py --model %s --max-steps %d"
           % ("qwen" if spec["adapter"].endswith("llama") else "llama",
              trainer.state.global_step))
-    print("\nTry it:  python main.py --model %s" % adapter_dir)
+    print("\nTry it:  python main.py --model %s-ft" % spec["adapter"].rsplit("_", 1)[-1])
 
 
 if __name__ == "__main__":

@@ -1,24 +1,11 @@
 #!/usr/bin/env python
-"""
-Malay Rojak Lemmatiser - interactive demo.
+# pyarrow has to be imported before torch on Windows, or the first table
+# render can crash the server
+import pyarrow  # noqa: F401
 
-    streamlit run app.py
-
-Same pipeline as main.py, with the stages made visible: preprocess -> model
--> lexicon corrections -> lemma sentence plus the derivation behind it.
-
-Serves one system, the fine-tuned Llama selected on the validation set; run
-another by hand with main.py --model qwen-ft (or llama-base, qwen-base).
-
-Not named streamlit.py on purpose: a module of that name in the project root
-shadows the streamlit package itself.
-"""
-
-# Must stay FIRST, above anything that can pull in torch: Arrow loaded after
-# torch corrupts the process heap on Windows and kills the server (0xC0000374,
-# no traceback) on the first st.dataframe render. Do not move or regroup.
-import pyarrow  # noqa: F401  (imported for its side effect: load order)
-
+import csv
+import html
+import io
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,249 +15,319 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-import lexicon                                                  # noqa: E402
-import main as cli                                              # noqa: E402
+import pipeline                                                 # noqa: E402
 import skill                                                    # noqa: E402
-from preprocess import NUMBER_POLICIES, trace                   # noqa: E402
+from preprocess import trace                                    # noqa: E402
 
-SELECTED = "llama-ft"
-BLURB = "Fine-tuned Llama 3.2 3B + LoRA - selected on the validation set"
+RULES_ONLY = "Rules only (no GPU)"
+REPO = "https://github.com/lgw123456789/Malay-Rojak-Lemmatiser"
+BATCH_LIMIT = {"rules": 2000, "model": 200}
+
+EXAMPLES = [
+    "Aku dh xleh handle keje tu, Kak Uji pun tau",
+    "Safwan best gilaaa!! nnti aku share link kat korang",
+    "Budak2 tu mmg x reti duduk diam la weh",
+    "Sy nk tny sikit, kedai tu bukak x arini?",
+]
+
+COLOURS = {
+    "RINGKAS":  "245, 158, 11",
+    "IMBUHAN":  "139, 92, 246",
+    "GANDA":    "236, 72, 153",
+    "PANJANG":  "6, 182, 212",
+    "PARTIKEL": "148, 163, 184",
+    "NAMA":     "34, 197, 94",
+    "INGGERIS": "59, 130, 246",
+    "NOMBOR":   "100, 116, 139",
+    "KAMUS":    "120, 120, 120",
+    "KEKAL":    "239, 68, 68",
+}
+
+CHIP_CSS = """
+<style>
+.chips {display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px;}
+.chip {display: inline-flex; flex-direction: column; align-items: center;
+       padding: 4px 10px; border-radius: 8px; border: 1px solid;
+       line-height: 1.3; min-width: 2.5em;}
+.chip .t {font-size: 0.75em; opacity: 0.75;}
+.chip .l {font-weight: 600;}
+.chip .r {font-size: 0.6em; letter-spacing: 0.05em; opacity: 0.8;}
+.chip.unsure {border-style: dashed;}
+.chip.fixed {box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.6);}
+.legend {display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.8em;}
+.legend span {padding: 1px 8px; border-radius: 6px; border: 1px solid;}
+</style>
+"""
 
 
 @st.cache_resource(show_spinner=False)
-def gpu_pool():
-    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="lemmatiser-gpu")
+def gpu_worker():
+    # one thread owns the model, so CUDA always sees the same thread
+    return ThreadPoolExecutor(max_workers=1)
 
 
-def on_gpu(fn, *args, **kwargs):
-    return gpu_pool().submit(fn, *args, **kwargs).result()
+def on_gpu(fn, *args):
+    return gpu_worker().submit(fn, *args).result()
 
 
-def _free_gb():
-    import torch
-    if not torch.cuda.is_available():
-        return None
-    free, _total = torch.cuda.mem_get_info()
-    return free / 1e9
+def get_model(name):
+    current = st.session_state.get("model")
+    if current is not None and current.name == name:
+        return current
+    if current is not None:
+        on_gpu(current.unload)
+        st.session_state.pop("model", None)
+    with st.spinner("Loading %s (about 30-60 s the first time)..." % name):
+        model = on_gpu(pipeline.Model, name)
+    st.session_state["model"] = model
+    return model
 
 
-def gpu_free_gb():
-    try:
-        return on_gpu(_free_gb)
-    except Exception:                                           # noqa: BLE001
-        return None
-
-
-def model_error(exc, name):
+def model_error(exc):
     msg = str(exc)
-    if ("dispatched on the CPU" in msg or "out of memory" in msg.lower()
-            or "OutOfMemory" in type(exc).__name__):
-        st.error("Not enough GPU memory to load **%s**." % name)
-        st.caption("A 3B model in 4-bit needs about 2.2 GB and this card "
-                   "has 4 GB, so only one fits at a time. Press **Unload "
-                   "model** in the sidebar, then try again. If nothing is "
-                   "loaded, close any other process holding the GPU "
-                   "(a training run, another Streamlit tab, or main.py).")
-        unload()
+    if isinstance(exc, ImportError):
+        st.error("The model packages are not installed. Run `SETUP.bat gpu`, "
+                 "or use **%s**." % RULES_ONLY)
+    elif "out of memory" in msg.lower() or "dispatched on the CPU" in msg:
+        st.error("Not enough GPU memory for the model. Close other programs "
+                 "using the GPU and try again.")
     else:
         st.error("Could not run the model: %s: %s" % (type(exc).__name__, msg))
 
 
-def show_status(slot):
-    held = st.session_state.get("model_choice")
-    free = gpu_free_gb()
-    with slot.container():
-        st.caption("Loaded: **%s**" % held if held else "Not loaded")
-        if free is not None:
-            st.caption("GPU free: %.1f GB" % free)
+def run(text, engine, follow):
+    """Lemmatise with the chosen engine, loading the model if needed."""
+    if engine == RULES_ONLY:
+        return pipeline.lemmatise(text, None, follow), None
+    model = get_model(engine)
+    return on_gpu(pipeline.lemmatise, text, model, follow), model
 
 
-def _to_cpu(bundle):
+def chip(step):
+    rgb = COLOURS.get(step["rule"], COLOURS["KAMUS"])
+    classes = ["chip"]
+    if step["uncertain"]:
+        classes.append("unsure")
+    if step.get("model_lemma"):
+        classes.append("fixed")
+    tip = "%s: %s" % (step["rule"], skill.RULES_EN.get(step["rule"], ""))
+    if step.get("model_lemma"):
+        tip += " | model said %s, training rules kept %s" % (step["model_lemma"], step["lemma"])
+    return ('<span class="%s" style="background: rgba(%s, 0.15); border-color: rgba(%s, 0.7)" '
+            'title="%s"><span class="t">%s</span><span class="l">%s</span>'
+            '<span class="r">%s</span></span>'
+            % (" ".join(classes), rgb, rgb, html.escape(tip, quote=True),
+               html.escape(step["token"]), html.escape(step["lemma"]), step["rule"]))
+
+
+def legend():
+    return '<div class="legend">%s</div>' % "".join(
+        '<span style="background: rgba(%s, 0.15); border-color: rgba(%s, 0.7)" title="%s">%s</span>'
+        % (rgb, rgb, html.escape(skill.RULES_EN[tag]), tag)
+        for tag, rgb in COLOURS.items())
+
+
+def table_rows(results, gloss):
+    rows = []
+    for n, res in enumerate(results, 1):
+        for s in res["steps"]:
+            rows.append({
+                "sentence": n,
+                "token": s["token"],
+                "lemma": s["lemma"],
+                "rule": s["rule"] + ("?" if s["uncertain"] else ""),
+                "meaning": gloss.get(s["rule"], ""),
+                "decided by": s["by"],
+                "model said": s.get("model_lemma", ""),
+            })
+    return rows
+
+
+def to_csv(rows):
+    buf = io.StringIO()
+    if rows:
+        w = csv.DictWriter(buf, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def use_example(text):
+    st.session_state["text"] = text
+
+
+def read_batch(upload, pasted):
+    lines = []
+    if upload is not None:
+        raw = upload.getvalue().decode("utf-8-sig", errors="replace")
+        if upload.name.lower().endswith(".csv"):
+            reader = csv.reader(io.StringIO(raw))
+            rows = list(reader)
+            if rows and rows[0] and rows[0][0].strip().lower() in ("text", "sentence", "ayat"):
+                rows = rows[1:]
+            lines = [r[0] for r in rows if r]
+        else:
+            lines = raw.splitlines()
+    lines += pasted.splitlines()
+    return [l.strip() for l in lines if l.strip()]
+
+
+def show_single(text, engine, follow, gloss):
+    if not text.strip():
+        st.warning("Type a sentence first.")
+        return
     try:
-        bundle[0].cpu()
-    except Exception:                                           # noqa: BLE001
-        # a quantised model that refuses to move is still worth collecting
-        pass
-
-
-def _sweep():
-    import gc
-
-    import torch
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
-def unload():
-    bundle = st.session_state.pop("model_bundle", None)
-    st.session_state.pop("model_choice", None)
-    if bundle is None:
+        with st.spinner("Lemmatising..."):
+            results, model = run(text, engine, follow)
+    except Exception as exc:                                    # noqa: BLE001
+        model_error(exc)
+        return
+    if not results:
+        st.warning("Nothing left after cleaning - try words rather than "
+                   "only emoji, links or symbols.")
         return
 
+    steps = [s for res in results for s in res["steps"]]
+    changed = sum(1 for s in steps if s["lemma"].lower() != s["token"].lower())
+    names = sum(1 for s in steps if s["rule"] == "NAMA")
+    fixed = sum(1 for s in steps if s.get("model_lemma"))
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Words", len(steps))
+    m2.metric("Changed", changed)
+    m3.metric("Proper nouns", names)
+    m4.metric("Model answers corrected", fixed if model is not None else "-",
+              help="Words where the model disagreed with the training-data "
+                   "label and the label was kept")
+
+    st.subheader("Lemma sentence")
+    st.code(" ".join(r["sentence"] for r in results), language=None, wrap_lines=True)
+
+    st.subheader("Word by word")
+    st.markdown('<div class="chips">%s</div>' % "".join(chip(s) for s in steps),
+                unsafe_allow_html=True)
+    st.caption("Hover over a word for details. Dashed border: the rules were "
+               "not sure. Red outline: the model's answer was replaced by "
+               "the training-data label.")
+    with st.expander("Colour key"):
+        st.markdown(legend(), unsafe_allow_html=True)
+
+    rows = table_rows(results, gloss)
+    st.dataframe(rows, width="stretch", hide_index=True)
+    st.download_button("Download as CSV", to_csv(rows),
+                       file_name="lemmas.csv", mime="text/csv")
+
+    if any(r["ok"] is False for r in results):
+        st.warning("The model's answer was not fully in the expected "
+                   "format; the rule labels filled the gaps.")
+
+    with st.expander("How the input was cleaned"):
+        for name, value in trace(text):
+            st.text("%-10s %s" % (name, value))
+    if model is not None:
+        with st.expander("Raw model output"):
+            for res in results:
+                st.code(res["raw"] or "(empty)", language=None)
+
+
+def show_batch(lines, engine, follow, gloss):
+    limit = BATCH_LIMIT["rules" if engine == RULES_ONLY else "model"]
+    if not lines:
+        st.warning("No sentences found.")
+        return
+    if len(lines) > limit:
+        st.warning("Only the first %d lines are processed with this engine." % limit)
+        lines = lines[:limit]
+
+    out, detail = [], []
+    bar = st.progress(0.0, text="0 / %d" % len(lines))
     try:
-        on_gpu(_to_cpu, bundle)
-    except Exception:                                           # noqa: BLE001
-        pass
-    del bundle          # this frame's reference, so the sweep can free the blocks
+        for i, line in enumerate(lines, 1):
+            results, _ = run(line, engine, follow)
+            out.append({"input": line,
+                        "lemmas": " ".join(r["sentence"] for r in results)})
+            for row in table_rows(results, gloss):
+                row["sentence"] = i
+                detail.append(row)
+            bar.progress(i / len(lines), text="%d / %d" % (i, len(lines)))
+    except Exception as exc:                                    # noqa: BLE001
+        model_error(exc)
+        return
+    bar.empty()
 
-    try:
-        on_gpu(_sweep)
-    except Exception:                                           # noqa: BLE001
-        pass
-
-
-def load(choice):
-    if st.session_state.get("model_choice") == choice:
-        return st.session_state["model_bundle"]
-
-    if st.session_state.get("model_choice"):
-        with st.spinner("Unloading %s..." % st.session_state["model_choice"]):
-            unload()
-
-    ref, _ = cli.resolve_model(choice)
-    with st.spinner("Loading %s (~40s)..." % choice):
-        model, tok, prompt = on_gpu(cli.load_model, ref)
-
-    bundle = (model, tok, prompt)
-    st.session_state["model_bundle"] = bundle
-    st.session_state["model_choice"] = choice
-    return bundle
+    st.dataframe(out, width="stretch", hide_index=True)
+    c1, c2 = st.columns(2)
+    c1.download_button("Download sentences (CSV)", to_csv(out),
+                       file_name="lemmas_sentences.csv", mime="text/csv")
+    c2.download_button("Download word by word (CSV)", to_csv(detail),
+                       file_name="lemmas_words.csv", mime="text/csv")
 
 
-st.set_page_config(page_title="Malay Rojak Lemmatiser", layout="wide")
+
+st.set_page_config(page_title="Malay Rojak Lemmatiser", page_icon="📝", layout="wide")
+st.markdown(CHIP_CSS, unsafe_allow_html=True)
 st.title("Malay Rojak Lemmatiser")
-st.caption("Type informal Malaysian Malay. The model returns the lemma form "
-           "and shows which rule produced each one.")
+st.caption("Type informal Malaysian Malay and get the lemma of every word, "
+           "with the rule behind it.")
 
 with st.sidebar:
-    st.header("Model")
-    st.caption(BLURB)
+    st.header("Engine")
+    choices = [RULES_ONLY]
+    if pipeline.gpu_packages():
+        choices += pipeline.adapters_on_disk() + list(pipeline.BASE_MODELS)
+    engine = st.selectbox("Lemmatiser", choices,
+                          index=1 if len(choices) > 1 and choices[1].endswith("-ft") else 0)
+    if not pipeline.gpu_packages():
+        st.caption("Install the GPU packages (`SETUP.bat gpu`) to use the "
+                   "fine-tuned model.")
+    elif not pipeline.adapters_on_disk():
+        st.caption("No fine-tuned adapter in `models/` yet - run "
+                   "`python download_model.py`.")
 
-    on_disk = (SELECTED in cli.BASE_MODELS
-               or (cli.MODELS[SELECTED] / "adapter_model.safetensors").exists())
-    if not on_disk:
-        st.error("%s is not on disk. Train it with `python train.py --model "
-                 "llama`, or copy the adapter folder into unsloth/."
-                 % SELECTED)
+    follow = st.checkbox(
+        "Follow the training rules exactly", value=True,
+        help="Words the rules are sure about (slang, particles, names, "
+             "numbers...) keep the label they had in the training data. "
+             "The model decides the rest.")
+    lang = st.radio("Rule glosses", ("ms", "en"), horizontal=True)
 
     status = st.empty()
 
-    if st.session_state.get("model_choice") \
-            and st.button("Unload model", use_container_width=True):
-        unload()
-        st.session_state["hold_off"] = SELECTED
-        st.rerun()
+    st.divider()
+    st.caption("[Source code and documentation](%s)" % REPO)
 
-    st.header("Pipeline")
-    clean = st.checkbox("Preprocess the input", value=True,
-                        help="Off sends the sentence exactly as typed, which "
-                             "is the form the model was fine-tuned on.")
-    numbers = st.selectbox("Digits", NUMBER_POLICIES, index=0,
-                           help="strip keeps the letters around a digit "
-                                "(8pagi -> pagi); drop removes the whole token.")
-    use_lex = st.checkbox("Apply the lexicon", value=True,
-                          help="Corrects the model's answer from "
-                               "data/user_lexicon.csv. Corrections are shown "
-                               "separately, never folded into the model's own "
-                               "output.")
-    lang = st.radio("Rule glosses", ("ms", "en"), horizontal=True)
+gloss = skill.RULES_EN if lang == "en" else skill.RULES
+single, batch = st.tabs(["One sentence", "Many sentences"])
 
-ready = True
-held_off = st.session_state.get("hold_off") == SELECTED
-if not held_off:
-    try:
-        load(SELECTED)
-    except Exception as exc:                                    # noqa: BLE001
-        model_error(exc, SELECTED)
-        ready = False
+with single:
+    st.caption("Try an example:")
+    cols = st.columns(len(EXAMPLES))
+    for col, example in zip(cols, EXAMPLES):
+        col.button(example, on_click=use_example, args=(example,), width="stretch")
 
-show_status(status)
-if held_off:
-    st.info("**%s** is unloaded and the GPU is free. Press **Lemmatise** to "
-            "load it again." % SELECTED)
+    with st.form("lemmatise"):
+        text = st.text_area("Sentence", key="text", height=90,
+                            placeholder="Aku dh xleh handle keje tu, Kak Uji pun tau")
+        go = st.form_submit_button("Lemmatise", type="primary")
+    if go:
+        show_single(text, engine, follow, gloss)
 
-with st.form("lemmatise"):
-    text = st.text_area("Sentence", height=90,
-                        placeholder="aku dh xleh handle keje tu la weh")
-    go = st.form_submit_button("Lemmatise", type="primary", disabled=not ready)
+with batch:
+    st.caption("One sentence per line. Upload a .txt file (or a .csv whose "
+               "first column is the text), or paste the lines below.")
+    upload = st.file_uploader("File", type=["txt", "csv"])
+    pasted = st.text_area("Or paste sentences", height=150, key="batch_text")
+    if st.button("Lemmatise all", type="primary"):
+        show_batch(read_batch(upload, pasted), engine, follow, gloss)
 
-if go:
-    if not text.strip():
-        st.warning("Type a sentence first.")
-        st.stop()
-
-    stages = trace(text, numbers) if clean else None
-    sent = stages[-1][1] if stages else None
-    sent = " ".join(sent) if isinstance(sent, list) else (sent or text)
-    if not sent.strip():
-        st.warning("Nothing survived preprocessing - try letters rather than "
-                   "only digits, emoji or punctuation.")
-        st.stop()
-
-    try:
-        st.session_state.pop("hold_off", None)
-        model, tok, prompt = load(SELECTED)
-        with st.spinner("Lemmatising..."):
-            raw = on_gpu(cli.lemmatise, model, tok, sent, prompt)
-    except Exception as exc:                                    # noqa: BLE001
-        model_error(exc, SELECTED)
-        if stages:
-            with st.expander("Preprocessing still ran", expanded=True):
-                for name, value in stages:
-                    st.text("%-16s %s" % (name, value))
-        st.stop()
-
-    parsed = skill.parse_response(raw)
-    n_fixed = lexicon.apply(parsed) if use_lex else 0
-
-    if not parsed["steps"]:
-        st.error("The model did not produce a parseable derivation.")
-        st.caption("Expected for an un-fine-tuned base model: on the gold test "
-                   "set base Llama failed this on 39.3% of inputs.")
-        st.code(raw or "(empty)")
-        st.stop()
-
-    st.subheader("Lemma sentence")
-    st.success(parsed["sentence"])
-
-    st.subheader("How each token was resolved")
-    gloss = skill.RULES_EN if lang == "en" else skill.RULES
-    rows = []
-    for s in parsed["steps"]:
-        rows.append({
-            "token": s["token"],
-            "lemma": s["lemma"],
-            "rule": s["rule"] + ("?" if s.get("uncertain") else ""),
-            "what that means": gloss.get(s["rule"], ""),
-            "source": "lexicon" if s.get("from_lexicon") else "model",
-        })
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-
-    changed = sum(1 for s in parsed["steps"]
-                  if s["lemma"].lower() != s["token"].lower())
-    st.caption("%d of %d tokens were changed; the rest were already in lemma "
-               "form." % (changed, len(parsed["steps"])))
-
-    if n_fixed:
-        with st.expander("%d token%s corrected from the lexicon, not by the "
-                         "model" % (n_fixed, "" if n_fixed == 1 else "s"),
-                         expanded=True):
-            st.caption("Shown separately so the derivation stays an account "
-                       "of what the model did.")
-            st.dataframe(
-                [{"token": s["token"], "model said": s["model_lemma"],
-                  "lexicon says": s["lemma"]}
-                 for s in parsed["steps"] if s.get("from_lexicon")],
-                use_container_width=True, hide_index=True)
-
-    if stages:
-        with st.expander("Preprocessing stages"):
-            for name, value in stages:
-                st.text("%-16s %s" % (name, value))
-    else:
-        st.caption("Preprocessing off - the sentence went to the model as "
-                   "typed.")
-
-    with st.expander("What the model actually returned"):
-        st.code(raw)
+# filled in last, so it already shows a model that was loaded during this run
+with status.container():
+    loaded = st.session_state.get("model")
+    if loaded is not None:
+        st.success("Loaded: **%s**" % loaded.name)
+        if st.button("Unload model", width="stretch"):
+            on_gpu(loaded.unload)
+            st.session_state.pop("model", None)
+            st.rerun()
+    elif engine != RULES_ONLY:
+        st.info("The model loads when you press Lemmatise.")

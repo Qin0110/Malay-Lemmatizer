@@ -1,0 +1,161 @@
+===============================================================
+  MALAY ROJAK LEMMATISER - HOW TO RUN (WINDOWS)
+===============================================================
+
+  SHORT VERSION
+  -------------
+  First time on a computer : SETUP.bat , then RUN.bat
+  Every time after that    : RUN.bat only
+
+
+===============================================================
+  STEP 1 - GET THE FILES
+===============================================================
+
+  Download the project as a ZIP and extract it
+  (right-click -> "Extract All..."), or clone it with git.
+
+  Open the folder. You should see SETUP.bat and RUN.bat.
+
+  Do NOT run the .bat files from inside the ZIP - extract
+  it first.
+
+
+===============================================================
+  STEP 2 - INSTALL (only the first time on a computer)
+===============================================================
+
+  Double-click:   SETUP.bat
+
+  A black window opens. It will:
+    1. Find Python 3.10-3.12 (or download a private copy)
+    2. Create a virtual environment for this project
+    3. Install Streamlit, pandas and the other packages
+    4. Ask about the fine-tuned model (only if you have an
+       NVIDIA graphics card - see below)
+    5. Check that everything works
+
+  This needs INTERNET and takes a few minutes.
+
+  THE FINE-TUNED MODEL QUESTION
+      If an NVIDIA GPU is found, setup asks:
+          Install it now? [Y/N]
+      Y  installs PyTorch and Unsloth, and downloads the
+         Llama 3.2 3B base model and the trained lemmatiser
+         model. About 7 GB, 15-30 minutes.
+      N  skips it. The rule-based lemmatiser still works.
+         You can add the model later by running:
+             SETUP.bat gpu
+
+  Wait until you see:
+
+      ===============================================
+        SETUP COMPLETE
+        Now double-click RUN.bat to start the app.
+      ===============================================
+
+  Then press any key to close the window.
+
+  If Windows shows a blue "Windows protected your PC" box,
+  click "More info" -> "Run anyway". The .bat files are not
+  digitally signed.
+
+  Nothing is installed system-wide and no administrator
+  password is needed. Everything goes into:
+      C:\Users\<you>\AppData\Local\RojakLemma
+
+
+===============================================================
+  STEP 3 - RUN THE APP
+===============================================================
+
+  Double-click:   RUN.bat
+
+  Your web browser opens at:
+
+      http://localhost:8501
+
+  KEEP THE BLACK WINDOW OPEN while you use the app.
+  Closing it stops the app.
+
+
+===============================================================
+  STEP 4 - USING THE APP
+===============================================================
+
+  1. Type a sentence in informal Malay, for example:
+         Aku dh xleh handle keje tu, Kak Uji pun tau
+
+  2. Click "Lemmatise" (or press Ctrl+Enter).
+
+  3. You get the lemma sentence, and a table with one row
+     per word: its lemma, the rule behind it, and whether
+     the rules or the model decided it.
+
+  4. Settings are in the sidebar (">" at the top left):
+       Lemmatiser   "Rules only", or the fine-tuned model
+                    "llama-ft" (needs the GPU packages)
+       Follow the training rules exactly
+                    keep it ticked - words the rules are sure
+                    about keep their training-data label
+       Rule glosses Malay or English explanations
+
+  The first sentence with a model takes 30-60 seconds while
+  it loads. After that it is quick.
+
+
+===============================================================
+  NEXT TIME
+===============================================================
+
+  SAME COMPUTER      Just double-click RUN.bat.
+  OTHER COMPUTER     Run SETUP.bat once there first.
+  NO INTERNET        Fine, once SETUP.bat has finished.
+
+
+===============================================================
+  IF SOMETHING GOES WRONG
+===============================================================
+
+  Whatever the problem, run SETUP.bat again first. It is safe
+  to re-run and prints a check of everything at the end.
+
+  Only "Rules only" in the Lemmatiser list
+      The GPU packages are not installed. Run:  SETUP.bat gpu
+
+  No llama-ft in the list
+      The model download did not finish. Run SETUP.bat gpu
+      again.
+
+  "CUDA is not available"
+      Your NVIDIA driver is too old. Update it from
+          https://www.nvidia.com/Download/index.aspx
+      (version 528 or newer).
+
+  "DLL load failed ... Application Control policy has
+  blocked this file"
+      Windows Smart App Control blocked the Python that setup
+      downloaded, because it is not signed. Install Python 3.12
+      from https://www.python.org/downloads/ , delete
+          C:\Users\<you>\AppData\Local\RojakLemma
+      and run SETUP.bat again.
+
+  The browser says "can't reach this page"
+      The app is still starting. Wait a few seconds and
+      refresh. Check the black window is still open.
+
+  Port 8501 already in use
+      The app is already running in another window.
+
+
+===============================================================
+  UNINSTALL
+===============================================================
+
+  Delete the folder:
+      C:\Users\<you>\AppData\Local\RojakLemma
+
+  That removes the Python runtime, the packages and the
+  downloaded model. Nothing else on the computer was changed.
+
+===============================================================

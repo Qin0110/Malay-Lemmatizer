@@ -1,3 +1,15 @@
+#!/usr/bin/env python
+"""Label the corpus with the rules and split it into train / dev.
+
+    python crawl/build_silver.py            label everything, write silver + split
+    python crawl/build_silver.py --check    is silver.jsonl still what the rules say?
+    python crawl/build_silver.py --dry-run
+
+Sentences in the gold and val sets (and their pools) are never used. A
+sentence keeps its train/dev side from the previous split; new sentences are
+split 90/10 within each difficulty band.
+"""
+
 import argparse
 import json
 import random
@@ -6,257 +18,152 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "crawl"))
-sys.path.insert(0, str(ROOT / "unsloth"))
+sys.path.insert(0, str(ROOT))
 
-from make_goldsheet import (WORD_RE, malindo_lemmas,      # noqa: E402
-                            malindo_roots, propose)
+import rules                                                      # noqa: E402
 
-CORPUS = ROOT / "data" / "corpus.jsonl"
-GOLD = ROOT / "data" / "gold.jsonl"
-GOLD_POOL = ROOT / "data" / "gold_pool.jsonl"
-SILVER = ROOT / "data" / "silver.jsonl"
-TRAIN_OUT = ROOT / "unsloth" / "data" / "training_split.jsonl"
-DEV_OUT = ROOT / "unsloth" / "data" / "dev_split.jsonl"
-MANIFEST = ROOT / "data" / "split_manifest.json"
-DEV_ANNOTATED = ROOT / "data" / "dev_annotated.jsonl"
+DATA = ROOT / "data"
+CORPUS = DATA / "corpus.jsonl"
+SILVER = DATA / "silver.jsonl"
+MANIFEST = DATA / "split_manifest.json"
 DEV_RATIO = 0.10
 SEED = 3407
 
-try:
-    from llm import SYSTEM_PROMPT
-except Exception:                                          # pragma: no cover
-    SYSTEM_PROMPT = (
-        "Anda adalah pelemma bahasa Melayu. Tukarkan ayat rojak kepada ayat "
-        "berbentuk lema. Kembalikan ayat sahaja."
-    )
+
+def jl(path):
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8") as fh:
+        return [json.loads(l) for l in fh if l.strip()]
 
 
-def excluded_ids():
-    """Sentence ids that must never appear in training data."""
-    ids = set()
-    for path in (GOLD, GOLD_POOL):
-        if path.exists():
-            for line in path.open(encoding="utf-8"):
-                if line.strip():
-                    ids.add(json.loads(line)["id"])
-    return ids
+def held_out_ids():
+    """Ids in any labelled set or labelling pool - never used for training."""
+    paths = [DATA / "gold.jsonl", DATA / "val.jsonl"] + sorted(DATA.glob("*_pool.jsonl"))
+    return {r["id"] for path in paths for r in jl(path)}
 
 
-def label(text, lex, roots):
-    tokens = WORD_RE.findall(text.lower())
-    out = []
-    for tok in tokens:
-        lemma, rule = propose(tok, lex, roots)
-        out.append({"t": tok, "l": lemma, "src": rule})
-    return out
+def label_row(row):
+    labels = rules.label(row["text"])
+    return {
+        "id": row["id"],
+        "text": row["text"],
+        "tokens": [e["t"] for e in labels],
+        "lemmas": labels,
+        "lemma_text": rules.lemma_text(labels),
+        "band": row.get("band"),
+    }
 
 
-def main(n_target, dry_run):
-    if not CORPUS.exists():
-        sys.exit("No data/corpus.jsonl. Run crawl/build_corpus.py first.")
+def split(rows, old):
+    """Keep each sentence's previous side; split new ones by band."""
+    train, dev, new = [], [], defaultdict(list)
+    for r in rows:
+        side = old.get(r["id"])
+        if side == "train":
+            train.append(r)
+        elif side == "dev":
+            dev.append(r)
+        else:
+            new[r["band"]].append(r)
 
-    skip = excluded_ids()
-    if not skip:
-        sys.exit("Found no gold ids to exclude - refusing to build a training "
-                 "set that might contain the test sentences.")
+    rng = random.Random(SEED)
+    for band in sorted(new):
+        group = sorted(new[band], key=lambda r: r["id"])
+        rng.shuffle(group)
+        n_dev = round(len(group) * DEV_RATIO)
+        dev += group[:n_dev]
+        train += group[n_dev:]
+    return train, dev
 
-    corpus = [json.loads(l) for l in CORPUS.open(encoding="utf-8") if l.strip()]
+
+def check():
+    silver = jl(SILVER)
+    if not silver:
+        sys.exit("No data/silver.jsonl yet.")
+    print("loading MALINDO...")
+    stale, examples = 0, Counter()
+    for row in silver:
+        fresh = rules.label(row["text"])
+        for old, new in zip(row["lemmas"], fresh):
+            if (old["t"], old["l"], old["src"]) != (new["t"], new["l"], new["src"]):
+                stale += 1
+                examples[(new["t"], old["l"], new["l"])] += 1
+        if len(fresh) != len(row["lemmas"]):
+            stale += 1
+    if not stale:
+        print("silver.jsonl matches the current rules exactly.")
+        return 0
+    print("%d tokens in silver.jsonl no longer match the rules, e.g.:" % stale)
+    for (t, old, new), n in examples.most_common(15):
+        print("  %-14s %-14s -> %-14s x%d" % (t, old, new, n))
+    print("\nRun python crawl/build_silver.py, then python crawl/build_sft.py")
+    return 1
+
+
+def main(limit, dry_run):
+    corpus = jl(CORPUS)
+    if not corpus:
+        sys.exit("No data/corpus.jsonl.")
+    skip = held_out_ids()
     pool = [r for r in corpus if r["id"] not in skip]
-    print("corpus %d, gold/pool excluded %d, available %d"
-          % (len(corpus), len(corpus) - len(pool), len(pool)))
+    if limit:
+        pool = pool[:limit]
+    print("corpus %d, held out %d, labelling %d" % (len(corpus), len(skip), len(pool)))
 
-    # Hard assertion: the exclusion actually worked.
-    leaked = [r["id"] for r in pool if r["id"] in skip]
-    assert not leaked, "gold sentences leaked into training: %s" % leaked[:5]
+    old = {}
+    if MANIFEST.exists():
+        man = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        old = {i: "train" for i in man["train_ids"]}
+        old.update({i: "dev" for i in man["dev_ids"]})
 
     print("loading MALINDO...")
-    lex, roots = malindo_lemmas(), malindo_roots()
+    rows = [label_row(r) for r in pool]
+    rows = [r for r in rows if r["lemmas"]]
+    train, dev = split(rows, old)
 
-    # Stratify by band so the training data spans the difficulty range in
-    # the same proportions the corpus does.
-    rng = random.Random(SEED)
-    by_band = defaultdict(list)
-    for row in pool:
-        by_band[row["band"]].append(row)
+    t_ids, d_ids = {r["id"] for r in train}, {r["id"] for r in dev}
+    assert not (t_ids & d_ids), "train and dev overlap"
+    assert not ((t_ids | d_ids) & skip), "a held-out sentence reached the training data"
 
-    n_target = min(n_target, len(pool))
-    picked = []
-    for band, rows in by_band.items():
-        share = round(n_target * len(rows) / len(pool))
-        picked += rng.sample(rows, min(share, len(rows)))
-    if len(picked) < n_target:
-        rest = [r for r in pool if r not in picked]
-        picked += rng.sample(rest, min(n_target - len(picked), len(rest)))
-    rng.shuffle(picked)
-
-    rows, src_counts = [], Counter()
-    for row in picked:
-        lemmas = label(row["text"], lex, roots)
-        if not lemmas:
-            continue
-        for e in lemmas:
-            src_counts[e["src"]] += 1
-        rows.append({
-            "id": row["id"],
-            "text": row["text"],
-            "tokens": [e["t"] for e in lemmas],
-            "lemmas": lemmas,
-            "lemma_text": " ".join(e["l"] for e in lemmas),
-            "band": row["band"],
-        })
-
-    train, dev = stratified_split(rows)
-
-    _report(rows, train, dev, src_counts, by_band, picked)
+    src = Counter(e["src"] for r in rows for e in r["lemmas"])
+    total = sum(src.values())
+    print("\n%d sentences, %d tokens   train %d / dev %d"
+          % (len(rows), total, len(train), len(dev)))
+    for name, n in src.most_common():
+        print("  %-11s %7d %5.1f%%" % (name, n, 100 * n / total))
 
     if dry_run:
         print("\n--dry-run: nothing written.")
         return
 
-    with SILVER.open("w", encoding="utf-8") as f:
+    with SILVER.open("w", encoding="utf-8") as fh:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print("\nwrote %d -> data/silver.jsonl" % len(rows))
-    write_splits(train, dev)
-
-
-def stratified_split(rows, seed=SEED):
-    rng = random.Random(seed)
-    by_band = defaultdict(list)
-    for r in rows:
-        by_band[r["band"]].append(r)
-
-    n_dev_total = max(1, round(len(rows) * DEV_RATIO))
-    dev = []
-    for band in sorted(by_band):
-        pool = sorted(by_band[band], key=lambda r: r["id"])   # deterministic
-        share = round(n_dev_total * len(pool) / len(rows))
-        dev += rng.sample(pool, min(share, len(pool)))
-
-    # Rounding per band can land a row or two off the target; top up or trim
-    # from the largest band so the total is exactly the intended size.
-    dev_ids = {r["id"] for r in dev}
-    if len(dev) < n_dev_total:
-        rest = [r for r in sorted(rows, key=lambda r: r["id"])
-                if r["id"] not in dev_ids]
-        dev += rng.sample(rest, n_dev_total - len(dev))
-    elif len(dev) > n_dev_total:
-        dev = rng.sample(dev, n_dev_total)
-
-    dev_ids = {r["id"] for r in dev}
-    train = [r for r in rows if r["id"] not in dev_ids]
-    rng.shuffle(train)
-    rng.shuffle(dev)
-    return train, dev
-
-
-def write_splits(train, dev):
-    """Write the ChatML splits and the manifest, then assert the design."""
-    gold_ids = excluded_ids()
-    train_ids = {r["id"] for r in train}
-    dev_ids = {r["id"] for r in dev}
-
-    assert not (train_ids & dev_ids), "train and dev overlap"
-    assert not (train_ids & gold_ids), "gold leaked into train"
-    assert not (dev_ids & gold_ids), "gold leaked into dev"
-    assert len(train_ids) == len(train), "duplicate ids in train"
-    assert len(dev_ids) == len(dev), "duplicate ids in dev"
-
-    TRAIN_OUT.parent.mkdir(parents=True, exist_ok=True)
-    _dump_chatml(TRAIN_OUT, train)
-    _dump_chatml(DEV_OUT, dev)
-
-    # The same dev rows with their per-token annotation kept, which
-    # llm.py --eval and any error analysis need. ChatML alone carries only
-    # text, and scoring needs lemmas/band/src.
-    with DEV_ANNOTATED.open("w", encoding="utf-8") as f:
-        for r in dev:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     MANIFEST.write_text(json.dumps({
         "seed": SEED,
         "dev_ratio": DEV_RATIO,
-        "counts": {"train": len(train), "dev": len(dev),
-                   "gold_excluded": len(gold_ids)},
+        "counts": {"train": len(train), "dev": len(dev), "held_out": len(skip)},
         "band_mix": {
             "train": dict(Counter(r["band"] for r in train)),
             "dev": dict(Counter(r["band"] for r in dev)),
         },
-        "train_ids": sorted(train_ids),
-        "dev_ids": sorted(dev_ids),
+        "train_ids": sorted(t_ids),
+        "dev_ids": sorted(d_ids),
     }, indent=1), encoding="utf-8")
-
-    print("wrote %d -> %s" % (len(train), TRAIN_OUT.relative_to(ROOT)))
-    print("wrote %d -> %s" % (len(dev), DEV_OUT.relative_to(ROOT)))
-    print("wrote %d -> %s" % (len(dev), DEV_ANNOTATED.relative_to(ROOT)))
-    print("wrote      -> %s" % MANIFEST.relative_to(ROOT))
-    print("\nband mix   train %s"
-          % sorted(Counter(r["band"] for r in train).items()))
-    print("           dev   %s"
-          % sorted(Counter(r["band"] for r in dev).items()))
-    print("\nchecks     train n dev = 0, train n gold = 0, dev n gold = 0  OK")
-    print("\nNext: cd unsloth && USE_REASONING=0 python llm.py --train")
-
-
-def resplit():
-    if not SILVER.exists():
-        sys.exit("No data/silver.jsonl. Run without --resplit first.")
-    rows = [json.loads(l) for l in SILVER.open(encoding="utf-8") if l.strip()]
-    print("re-splitting %d silver sentences, seed %d, dev ratio %.2f\n"
-          % (len(rows), SEED, DEV_RATIO))
-    train, dev = stratified_split(rows)
-    write_splits(train, dev)
-
-
-def _dump_chatml(path, rows):
-    with path.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps({"messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": r["text"]},
-                {"role": "assistant", "content": r["lemma_text"]},
-            ]}, ensure_ascii=False) + "\n")
-
-
-def _report(rows, train, dev, src_counts, by_band, picked):
-    total = sum(src_counts.values())
-    print("\n%d sentences, %d tokens  (train %d / dev %d)"
-          % (len(rows), total, len(train), len(dev)))
-
-    print("\n%-11s %7s %7s" % ("label src", "n", "share"))
-    print("-" * 27)
-    silver_ish = {"oov", "dict_check", "ambiguous", "affix"}
-    weak = 0
-    for src, n in src_counts.most_common():
-        flag = "  <- unverified" if src in silver_ish else ""
-        if src in silver_ish:
-            weak += n
-        print("%-11s %7d %6.1f%%%s" % (src, n, 100 * n / total, flag))
-    print("-" * 27)
-    print("%-11s %7d %6.1f%%" % ("unverified", weak, 100 * weak / total))
-
-    print("\nband mix: %s" % Counter(r["band"] for r in rows).most_common())
-    changed = sum(1 for r in rows for e in r["lemmas"] if e["t"] != e["l"])
-    print("tokens the label changes: %d/%d (%.0f%%)"
-          % (changed, total, 100 * changed / total))
-    print("\nsample:")
-    for r in rows[:3]:
-        t = r["text"].encode("ascii", "replace").decode()[:62]
-        l = r["lemma_text"].encode("ascii", "replace").decode()[:62]
-        print("   %s\n   -> %s" % (t, l))
+    print("\nwrote data/silver.jsonl and data/split_manifest.json")
+    print("Next: python crawl/build_sft.py")
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--n", type=int, default=3000,
-                   help="training sentences to generate (default 3000)")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    p = argparse.ArgumentParser(description="Rule-label the corpus for training.")
+    p.add_argument("--check", action="store_true",
+                   help="compare silver.jsonl with what the rules say now")
+    p.add_argument("--limit", type=int, default=0,
+                   help="only label the first N sentences (default: all)")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--resplit", action="store_true",
-                   help="redo the 90/10 split from the existing "
-                        "data/silver.jsonl without rebuilding it")
     a = p.parse_args()
-    if a.resplit:
-        resplit()
-    else:
-        main(a.n, a.dry_run)
+    sys.exit(check()) if a.check else main(a.limit, a.dry_run)

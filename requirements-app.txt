@@ -1,0 +1,11 @@
+# What the web app and the rule pipeline need. SETUP.bat installs this first.
+# No GPU required.
+streamlit==1.61.1
+pandas==2.3.3
+numpy==2.2.6
+pyarrow==24.0.0
+openpyxl==3.1.5
+requests==2.34.2
+
+# tags English words as INGGERIS; without it they come out as KEKAL
+pyenchant==3.3.0

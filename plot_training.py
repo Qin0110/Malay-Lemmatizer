@@ -1,3 +1,10 @@
+#!/usr/bin/env python
+"""Plot train and dev loss for the runs in models/training_runs/.
+
+    python plot_training.py             -> figures/
+    python plot_training.py --table     print the numbers instead
+"""
+
 import argparse
 import glob
 import json
@@ -6,7 +13,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-RUNS = ROOT / "unsloth" / "training_runs"
+RUNS = ROOT / "models" / "training_runs"
 
 TRAIN_COLOURS = {"llama": "#93c5fd", "qwen": "#fcd34d"}
 DEV_COLOURS = {"llama": "#dc2626", "qwen": "#059669"}

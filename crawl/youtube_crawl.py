@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+"""Collect comments from Malaysian YouTube channels into data/raw/.
+
+    python crawl/youtube_crawl.py --probe            sample each channel first
+    python crawl/youtube_crawl.py --videos 25        the real crawl (re-run to resume)
+    python crawl/youtube_crawl.py --channel @handle --videos 25
+
+Needs a YouTube Data API v3 key in a .env file: YOUTUBE_API_KEY=...
+Author names are never saved. Then: python crawl/build_corpus.py
+"""
+
 import argparse
 import json
 import os
@@ -15,15 +26,15 @@ STATE_FILE = RAW_DIR / "crawl_state.json"
 
 API = "https://www.googleapis.com/youtube/v3"
 DAILY_QUOTA = 10000
-MAX_PAGES_PER_VIDEO = 3        
+MAX_PAGES_PER_VIDEO = 3
 SOURCES = [
-    "@safwannazripod",          
-    "@thechiccodepodcast",     
-    "@legasipodcast",         
-    "@kitakitaajepodcast",      
-    "@PaduBeb",                
-    "@KumaarFamily",          
-    "@ichangrm",            
+    "@safwannazripod",
+    "@thechiccodepodcast",
+    "@legasipodcast",
+    "@kitakitaajepodcast",
+    "@PaduBeb",
+    "@KumaarFamily",
+    "@ichangrm",
     "@DESTINASITV",
     "@astroawani"
 ]
@@ -178,7 +189,7 @@ def read_api_key():
     )
 
 
-def crawl(videos_per_channel, max_pages, probe):
+def crawl(videos_per_channel, max_pages, probe, channels=None):
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     client = Client(read_api_key())
     state = load_state()
@@ -193,7 +204,7 @@ def crawl(videos_per_channel, max_pages, probe):
 
     out = None if probe else open(RAW_FILE, "a", encoding="utf-8")
     try:
-        for source in SOURCES:
+        for source in channels or SOURCES:
             playlist, title = uploads_playlist(client, source)
             if not playlist:
                 continue
@@ -303,6 +314,9 @@ if __name__ == "__main__":
     p.add_argument("--find", metavar="QUERY",
                    help="search for channels by name, print their handles")
     p.add_argument("--list", action="store_true")
+    p.add_argument("--channel", action="append", metavar="@HANDLE",
+                   help="crawl this channel instead of the built-in list "
+                        "(repeat for several)")
     a = p.parse_args()
 
     if a.find:
@@ -312,4 +326,4 @@ if __name__ == "__main__":
         for s in SOURCES:
             print("  " + s)
     else:
-        crawl(a.videos, a.pages, a.probe)
+        crawl(a.videos, a.pages, a.probe, a.channel)

@@ -5,10 +5,9 @@ import os
 import re
 import sys
 
-SKILL_VERSION = "v1-reasoning"
-
+SKILL_VERSION = "v2-reasoning"
+OLD_VERSION = "v1-reasoning"
 SKILL_FILE = "skill.json"
-
 
 RULES = {
     "KAMUS":    "kata dasar, sudah berbentuk lema",
@@ -17,6 +16,7 @@ RULES = {
     "GANDA":    "penggandaan diselesaikan kepada kata dasar",
     "PANJANG":  "huruf berulang dipendekkan",
     "PARTIKEL": "partikel wacana, sengaja tidak ditukar",
+    "NAMA":     "kata nama khas, dikekalkan seperti ditulis",
     "INGGERIS": "kata Inggeris, dikekalkan",
     "NOMBOR":   "nombor, masa, tarikh atau wang",
     "KEKAL":    "tidak dikenali, dikekalkan seadanya",
@@ -29,25 +29,24 @@ RULES_EN = {
     "GANDA":    "reduplication resolved to its base",
     "PANJANG":  "elongated letters collapsed",
     "PARTIKEL": "discourse particle, deliberately untouched",
+    "NAMA":     "proper noun, kept as written",
     "INGGERIS": "English token, kept as-is",
     "NOMBOR":   "number, time, date or money",
     "KEKAL":    "unrecognised, left alone",
 }
-
 
 SRC_TO_RULE = {
     "dict":       ("KAMUS",    False),
     "deriv":      ("KAMUS",    False),
     "slang":      ("RINGKAS",  False),
     "particle":   ("PARTIKEL", False),
+    "name":       ("NAMA",     False),
     "num":        ("NOMBOR",   False),
     "redup":      ("GANDA",    False),
     "elong":      ("PANJANG",  False),
     "codeswitch": ("INGGERIS", False),
     "affix":      ("IMBUHAN",  True),
-
     "ambiguous":  ("KAMUS",    True),
-
     "dict_check": ("KEKAL",    True),
     "oov":        ("KEKAL",    True),
     "unknown":    ("KEKAL",    True),
@@ -55,8 +54,9 @@ SRC_TO_RULE = {
 
 HUMAN_SRC = "human"
 
-
-SYSTEM_PROMPT = """\
+# The prompt the first Llama/Qwen adapters were trained with. Kept word for
+# word so those adapters still get exactly what they saw in training.
+SYSTEM_PROMPT_V1 = """\
 Anda pelemma bahasa Melayu rojak. Untuk setiap token, beri lema dan sebabnya.
 
 Format jawapan, tiada teks lain:
@@ -87,13 +87,43 @@ JANGAN:
 - jangan reka lema untuk kata yang tidak dikenali
 - jangan tulis apa-apa di luar <lema> dan <ayat>"""
 
+SYSTEM_PROMPT = """\
+Anda pelemma bahasa Melayu rojak. Untuk setiap token, beri lema dan sebabnya.
 
-PROMPTS = {"v1-reasoning": SYSTEM_PROMPT}
-DEFAULT_VERSION = SKILL_VERSION
+Format jawapan, tiada teks lain:
+<lema>
+token | PERATURAN | lema
+</lema>
+<ayat>ayat lema penuh</ayat>
+
+PERATURAN:
+KAMUS    kata dasar, kekal
+RINGKAS  singkatan/slanga dikembangkan (dh->sudah, xleh->tidak boleh)
+IMBUHAN  imbuhan dibuang (berjalan->jalan, memakan->makan)
+GANDA    penggandaan jadi satu lema (budak2->budak)
+PANJANG  huruf berulang dipendekkan (sedappp->sedap)
+PARTIKEL partikel wacana, kekal (la, weh, kan, je)
+NAMA     kata nama khas, kekal seperti ditulis (Safwan, Malaysia, Kak Uji)
+INGGERIS kata Inggeris, kekal
+NOMBOR   nombor, masa, tarikh, wang
+KEKAL    tidak dikenali, kekal
+Tulis "?" selepas peraturan jika tidak pasti, contoh: INGGERIS?
+
+JANGAN:
+- jangan terjemah ayat ke bahasa Inggeris
+- jangan jawab soalan atau beri pendapat; lemakan sahaja
+- satu baris bagi setiap token, tulis token seperti dalam ayat, ikut susunan asal
+- jangan tukar partikel atau nama khas; kekalkan huruf besar nama khas
+- jangan buang imbuhan daripada kata dasar (dengan, makan, kerana, sebab)
+- jangan pecahkan penggandaan kepada dua perkataan
+- jangan reka lema untuk kata yang tidak dikenali
+- jangan tulis apa-apa di luar <lema> dan <ayat>"""
+
+PROMPTS = {OLD_VERSION: SYSTEM_PROMPT_V1, SKILL_VERSION: SYSTEM_PROMPT}
 
 
 def version_for(adapter_dir):
-
+    """Which prompt an adapter was trained with, read from its skill.json."""
     meta = os.path.join(str(adapter_dir), SKILL_FILE)
     if os.path.exists(meta):
         try:
@@ -102,15 +132,11 @@ def version_for(adapter_dir):
             if v in PROMPTS:
                 return v
         except (OSError, ValueError):
-            pass          # an unreadable stamp is no worse than no stamp
-    print("[skill] %s carries no %s -- assuming %s. Stamp it with "
-          "write_version() to make this certain."
-          % (adapter_dir, SKILL_FILE, DEFAULT_VERSION))
-    return DEFAULT_VERSION
+            pass
+    return OLD_VERSION
 
 
 def prompt_for(adapter_dir):
-
     v = version_for(adapter_dir)
     return PROMPTS[v], v
 
@@ -120,8 +146,7 @@ def write_version(adapter_dir, version=SKILL_VERSION):
         raise ValueError("unknown skill version %r" % (version,))
     path = os.path.join(str(adapter_dir), SKILL_FILE)
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"skill_version": version, "skill_name": SKILL_VERSION},
-                  fh, indent=2)
+        json.dump({"skill_version": version}, fh, indent=2)
     return path
 
 
@@ -130,7 +155,6 @@ _ELONG_RE = re.compile(r"(.)\1{1,}")
 
 
 def infer_rule(token, lemma):
-
     t, l = token.lower(), lemma.lower()
     if t == l:
         return ("KAMUS", False)
@@ -154,7 +178,6 @@ def rule_for(src, token=None, lemma=None):
 
 
 def render_target(row):
-
     lines, words = [], []
     for e in row["lemmas"]:
         tag, uncertain = rule_for(e["src"], e["t"], e["l"])
@@ -180,7 +203,6 @@ LINE_RE = re.compile(r"^\s*(\S+)\s*\|\s*([A-Za-z]+)(\??)\s*\|\s*(.+?)\s*$")
 
 
 def parse_response(text):
-
     block = LEMA_BLOCK_RE.search(text)
     body = block.group(1) if block else text
 
@@ -217,6 +239,7 @@ TAGS_EN = {
     "GANDA":    "reduplication",
     "PANJANG":  "elongation",
     "PARTIKEL": "particle",
+    "NAMA":     "proper noun",
     "INGGERIS": "English",
     "NOMBOR":   "number",
     "KEKAL":    "unchanged",
@@ -233,7 +256,6 @@ def explain(rule, uncertain=False, lang="ms"):
 
 
 def format_result(parsed, lang="ms"):
-
     tags = TAGS_EN if lang == "en" else None
     out = [parsed["sentence"], ""]
     width = max((len(s["token"]) for s in parsed["steps"]), default=0)

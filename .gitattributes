@@ -1,0 +1,17 @@
+* text=auto
+
+# Batch files must keep CRLF or cmd.exe mis-parses labels and goto.
+*.bat   text eol=crlf
+*.txt   text eol=crlf
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.jsonl text eol=lf
+*.toml  text eol=lf
+*.jinja text eol=lf
+*.csv   text eol=lf
+*.tsv   text eol=lf
+
+*.safetensors binary
+*.xlsx        binary

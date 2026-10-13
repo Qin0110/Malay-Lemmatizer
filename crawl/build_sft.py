@@ -1,4 +1,12 @@
 #!/usr/bin/env python
+"""Render the labelled data as chat examples for fine-tuning.
+
+    python crawl/build_sft.py              -> data/sft/train.jsonl, data/sft/dev.jsonl
+    python crawl/build_sft.py --show 2     print a couple of rendered examples
+
+Stops if data/silver.jsonl is out of date with the rules, so the model is
+never trained on labels the app would contradict.
+"""
 
 import argparse
 import json
@@ -8,106 +16,73 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "crawl"))
 
-import skill                                                  # noqa: E402
+import build_silver                                               # noqa: E402
+import skill                                                      # noqa: E402
 
-SILVER = ROOT / "data" / "silver.jsonl"
-GOLD = ROOT / "data" / "gold.jsonl"
-MANIFEST = ROOT / "data" / "split_manifest.json"
-OUT_DIR = ROOT / "unsloth" / "data"
-TRAIN_OUT = OUT_DIR / "train_reasoning.jsonl"
-DEV_OUT = OUT_DIR / "dev_reasoning.jsonl"
-
-
-def jl(path):
-    with path.open(encoding="utf-8") as fh:
-        return [json.loads(line) for line in fh if line.strip()]
+SFT_DIR = ROOT / "data" / "sft"
+TRAIN_OUT = SFT_DIR / "train.jsonl"
+DEV_OUT = SFT_DIR / "dev.jsonl"
 
 
-def main(dry_run, show):
-    for path in (SILVER, MANIFEST):
-        if not path.exists():
-            sys.exit("missing %s" % path.relative_to(ROOT))
+def main(dry_run, show, skip_check):
+    silver = {r["id"]: r for r in build_silver.jl(build_silver.SILVER)}
+    if not silver or not build_silver.MANIFEST.exists():
+        sys.exit("Run python crawl/build_silver.py first.")
+    if not skip_check and build_silver.check() != 0:
+        sys.exit("\nNothing written.")
 
-    silver = {r["id"]: r for r in jl(SILVER)}
-    man = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    man = json.loads(build_silver.MANIFEST.read_text(encoding="utf-8"))
+    held = build_silver.held_out_ids()
     train_ids = [i for i in man["train_ids"] if i in silver]
     dev_ids = [i for i in man["dev_ids"] if i in silver]
-    gold_ids = {r["id"] for r in jl(GOLD)} if GOLD.exists() else set()
+    if set(train_ids) & set(dev_ids) or (set(train_ids) | set(dev_ids)) & held:
+        sys.exit("The split overlaps the dev, gold or val sets - nothing written.")
 
-    print("silver %d | manifest: train %d, dev %d"
-          % (len(silver), len(man["train_ids"]), len(man["dev_ids"])))
-
-    # ---- the assertions the experiment rests on --------------------------
-    ok = True
-
-    def check(label, condition, detail=""):
-        nonlocal ok
-        print("  %-44s %s%s" % (label, "PASS" if condition else "FAIL",
-                                "" if condition else "   " + detail))
-        ok &= condition
-
-    print("\nSPLIT INTEGRITY")
-    check("train n dev = 0", not (set(train_ids) & set(dev_ids)))
-    check("train n gold = 0", not (set(train_ids) & gold_ids))
-    check("dev n gold = 0", not (set(dev_ids) & gold_ids))
-    check("every manifest id resolves in silver",
-          len(train_ids) == len(man["train_ids"])
-          and len(dev_ids) == len(man["dev_ids"]),
-          "%d/%d train, %d/%d dev" % (len(train_ids), len(man["train_ids"]),
-                                      len(dev_ids), len(man["dev_ids"])))
-    if not ok:
-        sys.exit("\nSplit integrity failed - nothing written.")
-
-    # ---- render ----------------------------------------------------------
     tags = Counter()
     splits = []
-    for name, ids, out in (("train", train_ids, TRAIN_OUT),
-                           ("dev", dev_ids, DEV_OUT)):
+    for name, ids, out in (("train", train_ids, TRAIN_OUT), ("dev", dev_ids, DEV_OUT)):
         rows = []
         for sid in ids:
-            row = silver[sid]
-            rows.append(skill.to_chatml(row))
-            for e in row["lemmas"]:
-                tag, _unc = skill.rule_for(e["src"], e["t"], e["l"])
-                tags[tag] += 1
+            rows.append(skill.to_chatml(silver[sid]))
+            for e in silver[sid]["lemmas"]:
+                tags[skill.rule_for(e["src"])[0]] += 1
         splits.append((name, rows, out))
 
-    print("\nRULE TAGS ACROSS THE TARGETS")
     total = sum(tags.values())
+    print("\nrule tags in the targets")
     for tag, n in tags.most_common():
-        print("  %-9s %6d  %4.1f%%" % (tag, n, 100 * n / total))
-    missing = [t for t in skill.RULES if not tags[t]]
-    if missing:
-        print("\n  WARNING: %s appear in the system prompt but never in the "
-              "targets. A tag with no training examples is one the model will "
-              "apply at random." % ", ".join(missing))
+        print("  %-9s %7d %5.1f%%" % (tag, n, 100 * n / total))
 
-    if show:
-        for name, rows, _ in splits:
-            for row in rows[:show]:
-                print("\n" + "=" * 68)
-                print("[%s] %s" % (name, row["messages"][1]["content"]))
-                print("-" * 68)
-                print(row["messages"][2]["content"])
-            break
+    for _, rows, _ in splits[:1]:
+        for row in rows[:show]:
+            print("\n" + "=" * 68)
+            print(row["messages"][1]["content"])
+            print("-" * 68)
+            print(row["messages"][2]["content"])
 
     if dry_run:
         print("\n--dry-run: nothing written.")
         return
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    SFT_DIR.mkdir(parents=True, exist_ok=True)
     for name, rows, out in splits:
         with out.open("w", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        print("\n%-5s %5d rows -> %s" % (name, len(rows), out.relative_to(ROOT)))
+        print("%-5s %5d examples -> %s" % (name, len(rows), out.relative_to(ROOT)))
+    print("\nNext: python train.py --model llama")
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    p = argparse.ArgumentParser(description="Render the training examples.")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--show", type=int, default=0,
-                   help="print N rendered examples")
+    p.add_argument("--show", type=int, default=0, help="print N examples")
+    p.add_argument("--skip-check", action="store_true",
+                   help="do not compare silver.jsonl with the rules first")
     a = p.parse_args()
-    main(a.dry_run, a.show)
+    main(a.dry_run, a.show, a.skip_check)

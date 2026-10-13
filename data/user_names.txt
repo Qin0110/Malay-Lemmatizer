@@ -1,0 +1,23 @@
+# Proper nouns to always keep as written, one per line, any case.
+# Add your own with: python lexicon.py --add-name "Berjaya Grocer"
+Kuala Lumpur
+Petaling Jaya
+Shah Alam
+Johor Bahru
+Kota Kinabalu
+Kota Bharu
+Kuala Terengganu
+Alor Setar
+Pulau Pinang
+Negeri Sembilan
+Cameron Highlands
+Bukit Bintang
+Bukit Jalil
+Genting Highlands
+Kuala Selangor
+Port Dickson
+Seri Kembangan
+Bandar Baru Bangi
+Berjaya Grocer
+Mydin Mall
+P Ramlee

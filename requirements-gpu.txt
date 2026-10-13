@@ -1,0 +1,28 @@
+# Extra packages for the fine-tuned model: the app's model option, main.py,
+# train.py and evaluate.py --model. Needs an NVIDIA GPU (driver 528 or newer).
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+torch==2.11.0+cu126
+torchvision==0.26.0+cu126
+triton-windows==3.7.1.post27 ; sys_platform == "win32"
+xformers==0.0.35
+bitsandbytes==0.50.1
+
+unsloth==2026.8.18
+unsloth_zoo==2026.8.12
+transformers==5.5.0
+trl==0.24.0
+peft==0.20.0
+accelerate==1.14.0
+datasets==4.3.0
+diffusers==0.39.0
+torchao==0.18.0
+cut-cross-entropy==25.1.1
+huggingface_hub==1.23.0
+hf_transfer==0.1.9
+tokenizers==0.22.2
+safetensors==0.8.0
+sentencepiece==0.2.1
+
+# plot_training.py
+matplotlib==3.10.9

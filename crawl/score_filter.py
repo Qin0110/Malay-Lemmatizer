@@ -1,3 +1,12 @@
+#!/usr/bin/env python
+"""Precision and recall of the rojak filter, from a hand-checked sample.
+
+    python crawl/score_filter.py
+
+Fill the Y/N column of data/filter_check.xlsx first
+(python crawl/build_corpus.py --validate writes a new one).
+"""
+
 import sys
 from collections import Counter
 from pathlib import Path
@@ -93,19 +102,18 @@ def main():
 
     print()
     if kept_y + kept_n and kept_y / (kept_y + kept_n) < 0.75:
-        print("Precision below 75%: the corpus is contaminated. Raise the bar:")
-        print("    python crawl/build_corpus.py --min-hits 3 --validate")
+        print("Precision below 75%: too much non-rojak gets in. Use a stricter")
+        print("filter for new data: python crawl/build_corpus.py --min-hits 3")
     elif kept_y + rej_y and kept_y / (kept_y + rej_y) < 0.60:
-        print("Recall below 60%: too much good data is being discarded. Try:")
-        print("    python crawl/build_corpus.py --min-hits 1 --validate")
+        print("Recall below 60%: too much rojak is thrown away. Try:")
+        print("    python crawl/build_corpus.py --min-hits 1")
     else:
-        print("Filter looks usable. Note both numbers for the report, then")
-        print("move on to labelling data/gold_pool.jsonl.")
+        print("The filter looks fine.")
 
-    print("\nNOTE for the report: the REJECTED rows here are a sample of what")
+    print("\nNote: the REJECTED rows here are a sample of what")
     print("the filter threw out, so recall is measured only against sentences")
     print("that survived cleaning and the length filter - not against every")
-    print("comment crawled. Say so when you quote the number.")
+    print("comment crawled.")
 
 
 if __name__ == "__main__":

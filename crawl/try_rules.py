@@ -1,98 +1,76 @@
+#!/usr/bin/env python
+"""Try the rules on your own sentences (no GPU).
+
+    python crawl/try_rules.py "aq nk tdr dlu, esok kite jumpe kat umah"
+    python crawl/try_rules.py                  interactive
+"""
+
 import argparse
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "crawl"))
+sys.path.insert(0, str(ROOT))
 
-from make_goldsheet import (WORD_RE, malindo_lemmas,        # noqa: E402
-                            malindo_roots, pick, propose)
+import rules                                                      # noqa: E402
+from preprocess import prepare                                    # noqa: E402
 
-# What each tag means, so the output explains itself.
 TAGS = {
-    "particle": "a discourse particle (lah, kan, je) stripped",
-    "slang": "found in the slang lexicon or BM_dict",
+    "particle": "discourse particle, kept",
+    "slang": "slang lexicon",
+    "name": "proper noun, kept as written",
     "redup": "reduplication resolved to its base",
-    "elong": "elongated spelling collapsed (sooooo -> so)",
-    "affix": "a prefix or suffix stripped",
-    "dict": "MALINDO resolved it cleanly",
-    "dict_check": "MALINDO echoed an informal spelling back - UNVERIFIED",
-    "ambiguous": "several candidates, the first was taken - UNVERIFIED",
-    "codeswitch": "detected as English, correctly left alone",
-    "num": "a numeral",
-    "oov": "nothing in the cascade resolved it - LEFT UNCHANGED",
+    "elong": "elongation collapsed",
+    "affix": "affix stripped (MALINDO root)",
+    "deriv": "derived noun, kept",
+    "dict": "MALINDO, already a lemma",
+    "dict_check": "MALINDO only echoed the spelling - unverified",
+    "ambiguous": "several MALINDO lemmas, shortest taken - unverified",
+    "codeswitch": "English, kept",
+    "num": "number",
+    "oov": "nothing matched, kept - unverified",
 }
 
 
-def show(text, lex, roots):
-    tokens = WORD_RE.findall(text.lower())
-    if not tokens:
-        print("  nothing to lemmatise - letters please, not only digits\n")
-        return
-
-    rows = []
-    for t in tokens:
-        lemma, tag = propose(t, lex, roots)
-        md, _ = pick(lex.get(t, []), t)
-        rows.append((t, lemma, tag, md or t))
-
-    w = max(len(r[0]) for r in rows) + 2
-    l = max(len(str(r[1])) for r in rows) + 2
-    print("  %-*s %-*s %-12s %s" % (w, "token", l, "rules", "tag", "MALINDO only"))
-    print("  " + "-" * (w + l + 40))
-    for tok, lemma, tag, md in rows:
-        print("  %-*s %-*s %-12s %s" % (w, tok, l, lemma, tag, md))
-    print()
-    print("  lemma sentence : %s" % " ".join(str(r[1]) for r in rows))
-    print("  MALINDO alone  : %s" % " ".join(str(r[3]) for r in rows))
-
-    changed = sum(1 for r in rows if str(r[1]) != r[0])
-    missed = sum(1 for r in rows if str(r[1]) != r[3])
-    print("  %d of %d tokens changed; MALINDO alone left %d of those unchanged"
-          % (changed, len(rows), missed))
-
-    seen = [r[2] for r in rows]
-    if seen:
+def show(text):
+    lex = rules.malindo()[0]
+    for sent in prepare(text):
+        labels = rules.label(sent)
+        w = max(len(e["t"]) for e in labels) + 2
+        print("  %-*s %-16s %-11s %s" % (w, "token", "lemma", "rule", "MALINDO only"))
+        print("  " + "-" * (w + 45))
+        for e in labels:
+            low = e["t"].lower()
+            plain, _ = rules.pick(lex.get(low, []), low)
+            print("  %-*s %-16s %-11s %s" % (w, e["t"], e["l"], e["src"], plain or low))
+        print("\n  " + rules.lemma_text(labels))
+        print("  tags: " + "; ".join("%s = %s" % (t, TAGS.get(t, "?"))
+                                     for t in dict.fromkeys(e["src"] for e in labels)))
         print()
-        print("  tags that fired:")
-        for tag in dict.fromkeys(seen):
-            flag = " <-- unverified" if tag in ("oov", "dict_check",
-                                                "ambiguous") else ""
-            print("    %-12s %s%s" % (tag, TAGS.get(tag, "?"), flag))
-    print()
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("text", nargs="*", help="sentence to lemmatise")
-    p.add_argument("--stdin", action="store_true",
-                   help="read sentences from stdin, one per line")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    p = argparse.ArgumentParser(description="Run the rule lemmatiser.")
+    p.add_argument("text", nargs="*")
     a = p.parse_args()
 
-    print("loading MALINDO... (255,941 rows, about 40s)")
-    lex, roots = malindo_lemmas(), malindo_roots()
-    print("ready.\n")
-
+    print("loading MALINDO...")
+    rules.malindo()
     if a.text:
-        show(" ".join(a.text), lex, roots)
+        show(" ".join(a.text))
         return
-    if a.stdin:
-        for line in sys.stdin:
-            if line.strip():
-                print("> %s" % line.strip())
-                show(line.strip(), lex, roots)
-        return
-
-    print("Type a rojak sentence. Blank line or Ctrl+C to quit.\n")
+    print("Type a sentence. Blank line to quit.\n")
     while True:
         try:
             line = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
             return
         if not line:
             return
-        show(line, lex, roots)
+        show(line)
 
 
 if __name__ == "__main__":

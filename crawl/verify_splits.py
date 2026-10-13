@@ -1,138 +1,85 @@
+#!/usr/bin/env python
+"""Check that train, dev, val and gold are kept apart and in sync.
+
+    python crawl/verify_splits.py
+
+Exits with 1 if any check fails, so it can run before training.
+"""
+
 import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SILVER = ROOT / "data" / "silver.jsonl"
-GOLD = ROOT / "data" / "gold.jsonl"
-GOLD_POOL = ROOT / "data" / "gold_pool.jsonl"
-MANIFEST = ROOT / "data" / "split_manifest.json"
-TRAIN = ROOT / "unsloth" / "data" / "train_reasoning.jsonl"
-DEV = ROOT / "unsloth" / "data" / "dev_reasoning.jsonl"
-VAL = ROOT / "data" / "val.jsonl"
-EXPECT_GOLD = 150
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "crawl"))
+
+import build_silver                                               # noqa: E402
+import skill                                                      # noqa: E402
+
+DATA = ROOT / "data"
+TRAIN = DATA / "sft" / "train.jsonl"
+DEV = DATA / "sft" / "dev.jsonl"
 
 failures = []
 
 
 def check(label, ok, detail=""):
-    print("  %-52s %s%s" % (label, "PASS" if ok else "FAIL",
+    print("  %-50s %s%s" % (label, "PASS" if ok else "FAIL",
                             "" if ok else "   " + detail))
     if not ok:
         failures.append(label)
 
 
-def jl(p):
-    return [json.loads(l) for l in p.open(encoding="utf-8") if l.strip()]
+def ids(path):
+    return {r["id"] for r in build_silver.jl(path)}
 
 
-for p in (SILVER, GOLD, MANIFEST, TRAIN, DEV):
-    if not p.exists():
-        sys.exit("missing %s - run `python crawl/build_silver.py --n 8000`"
-                 % p.relative_to(ROOT))
+def main():
+    for path in (build_silver.SILVER, build_silver.MANIFEST, TRAIN, DEV):
+        if not path.exists():
+            sys.exit("missing %s - run crawl/build_silver.py and crawl/build_sft.py"
+                     % path.relative_to(ROOT))
 
-silver = jl(SILVER)
-gold = jl(GOLD)
-pool = jl(GOLD_POOL) if GOLD_POOL.exists() else []
-train = jl(TRAIN)
-dev = jl(DEV)
-man = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    silver = {r["id"]: r for r in build_silver.jl(build_silver.SILVER)}
+    man = json.loads(build_silver.MANIFEST.read_text(encoding="utf-8"))
+    train_ids, dev_ids = set(man["train_ids"]), set(man["dev_ids"])
+    train, dev = build_silver.jl(TRAIN), build_silver.jl(DEV)
+    gold, val = ids(DATA / "gold.jsonl"), ids(DATA / "val.jsonl")
+    held = build_silver.held_out_ids()
 
-train_ids = set(man["train_ids"])
-dev_ids = set(man["dev_ids"])
-gold_ids = {r["id"] for r in gold}
-val = jl(VAL) if VAL.exists() else []
-val_ids = {r["id"] for r in val}
-pool_ids = {r["id"] for r in pool}
-silver_ids = {r["id"] for r in silver}
+    print("\nSIZES")
+    check("train file matches the manifest (%d)" % len(train_ids), len(train) == len(train_ids),
+          str(len(train)))
+    check("dev file matches the manifest (%d)" % len(dev_ids), len(dev) == len(dev_ids),
+          str(len(dev)))
+    check("every manifest id is in silver", (train_ids | dev_ids) <= set(silver))
 
-ratio = man.get("dev_ratio", 0.10)
-exp_dev = max(1, round(len(silver) * ratio))
-exp_train = len(silver) - exp_dev
+    print("\nNO OVERLAP")
+    check("train and dev", not (train_ids & dev_ids))
+    check("train/dev and gold (%d)" % len(gold), not ((train_ids | dev_ids) & gold))
+    check("train/dev and val (%d)" % len(val), not ((train_ids | dev_ids) & val))
+    check("train/dev and every labelling pool", not ((train_ids | dev_ids) & held))
+    check("gold and val", not (gold & val))
+    texts = lambda rows: {r["messages"][1]["content"] for r in rows}
+    check("no sentence in both train and dev", not (texts(train) & texts(dev)))
 
-print("\nCOUNTS   (silver %d, dev_ratio %.2f from the manifest)"
-      % (len(silver), ratio))
-check("train = %d" % exp_train, len(train) == exp_train, str(len(train)))
-check("validation = %d" % exp_dev, len(dev) == exp_dev, str(len(dev)))
-check("gold test = %d" % EXPECT_GOLD, len(gold) == EXPECT_GOLD, str(len(gold)))
-check("manifest ids match the files",
-      len(train_ids) == len(train) and len(dev_ids) == len(dev))
-check("train + dev = silver (%d)" % len(silver),
-      len(train) + len(dev) == len(silver),
-      "%d + %d" % (len(train), len(dev)))
+    print("\nTARGETS")
+    check("one system prompt, the current one",
+          {r["messages"][0]["content"] for r in train + dev} == {skill.SYSTEM_PROMPT})
+    by_text = {silver[i]["text"]: silver[i] for i in train_ids | dev_ids if i in silver}
+    bad = sum(1 for r in train + dev
+              if skill.render_target(by_text[r["messages"][1]["content"]])
+              != r["messages"][2]["content"])
+    check("every target matches its silver labels", bad == 0, "%d differ" % bad)
 
-print("\nDISJOINTNESS")
-check("train n validation = 0", not (train_ids & dev_ids),
-      str(sorted(train_ids & dev_ids)[:3]))
-check("train n gold = 0", not (train_ids & gold_ids),
-      str(sorted(train_ids & gold_ids)[:3]))
-check("dev n gold = 0", not (dev_ids & gold_ids),
-      str(sorted(dev_ids & gold_ids)[:3]))
-if val_ids:
-    check("val n train = 0", not (val_ids & train_ids),
-          str(sorted(val_ids & train_ids)[:3]))
-    check("val n dev = 0", not (val_ids & dev_ids),
-          str(sorted(val_ids & dev_ids)[:3]))
-    check("val n gold = 0", not (val_ids & gold_ids),
-          str(sorted(val_ids & gold_ids)[:3]))
-else:
-    print("  %-52s %s" % ("val split not collected yet", "SKIP"))
-check("train n gold_pool = 0", not (train_ids & pool_ids),
-      str(sorted(train_ids & pool_ids)[:3]))
-check("validation n gold_pool = 0", not (dev_ids & pool_ids),
-      str(sorted(dev_ids & pool_ids)[:3]))
-check("train u validation = silver ids",
-      (train_ids | dev_ids) == silver_ids)
+    print()
+    if failures:
+        print("%d check(s) failed." % len(failures))
+        sys.exit(1)
+    print("All checks passed: train %d, dev %d, val %d, gold %d."
+          % (len(train), len(dev), len(val), len(gold)))
 
-print("\nCONTENT")
-sil = {r["id"]: r for r in silver}
-tr_txt = [m["messages"][1]["content"] for m in train]
-dv_txt = [m["messages"][1]["content"] for m in dev]
-check("no duplicate sentences across train and dev",
-      not (set(tr_txt) & set(dv_txt)),
-      "%d shared" % len(set(tr_txt) & set(dv_txt)))
-check("one distinct system prompt in train",
-      len({m["messages"][0]["content"] for m in train}) == 1)
-check("train and dev share that system prompt",
-      {m["messages"][0]["content"] for m in train}
-      == {m["messages"][0]["content"] for m in dev})
 
-sys.path.insert(0, str(ROOT))
-import skill                                                   # noqa: E402
-
-by_id_train = dict(zip((m["messages"][1]["content"] for m in train), train))
-mismatch = 0
-for r in silver:
-    if r["id"] not in train_ids or r["text"] not in by_id_train:
-        continue
-    target = by_id_train[r["text"]]["messages"][2]["content"]
-    got = skill.parse_response(target)
-    lemmas_ok = [s["lemma"] for s in got["steps"]] == [e["l"] for e in r["lemmas"]]
-    if not (lemmas_ok and got["sentence"].split() == r["lemma_text"].split()):
-        mismatch += 1
-check("train targets consistent with silver labels", mismatch == 0,
-      "%d differ" % mismatch)
-
-print("\nBAND STRATIFICATION")
-for band in ("low", "mid", "high"):
-    t = sum(1 for i in train_ids if sil[i]["band"] == band)
-    d = sum(1 for i in dev_ids if sil[i]["band"] == band)
-    tp, dp = 100 * t / len(train_ids), 100 * d / len(dev_ids)
-    check("%-4s train %5.1f%%  dev %5.1f%%  (gap < 3pp)" % (band, tp, dp),
-          abs(tp - dp) < 3.0, "gap %.1fpp" % abs(tp - dp))
-
-print("\nREPRODUCIBILITY")
-check("manifest records the seed", "seed" in man, "")
-check("manifest records the dev ratio", "dev_ratio" in man, "")
-
-print()
-if failures:
-    print("%d CHECK(S) FAILED: %s" % (len(failures), "; ".join(failures)))
-    sys.exit(1)
-print("all checks passed - the four-way design holds.")
-print("  train      %4d   unsloth/data/train_reasoning.jsonl" % len(train))
-print("  dev        %4d   unsloth/data/dev_reasoning.jsonl" % len(dev))
-if val:
-    print("  val        %4d   data/val.jsonl   (model selection)" % len(val))
-print("  gold test  %4d   data/gold.jsonl  (never read during training)"
-      % len(gold))
+if __name__ == "__main__":
+    main()
